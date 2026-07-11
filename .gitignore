@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Data
+data/raw/
+data/manual/
+data/samples/
+*.csv
+*.json
+*.xml
+*.html
+*.parquet
+
+# Notebooks
+.ipynb_checkpoints/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# Docker / OS
+*.log
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+EOF
