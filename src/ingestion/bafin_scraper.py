@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
+from typing import Any
 
 try:
     from dotenv import load_dotenv
@@ -71,7 +72,6 @@ def validate_environment() -> None:
         "MINIO_ROOT_PASSWORD": MINIO_ROOT_PASSWORD,
         "MINIO_BUCKET": MINIO_BUCKET,
         "BAFIN_CANDIDATES_FILE": BAFIN_CANDIDATES_FILE,
-        "BAFIN_COMPANY_SEARCH_URL_TEMPLATE": BAFIN_COMPANY_SEARCH_URL_TEMPLATE,
     }
 
     missing = [key for key, value in required_values.items() if not value]
@@ -88,12 +88,6 @@ def validate_environment() -> None:
             f"BaFin candidates file does not exist: {BAFIN_CANDIDATES_FILE}"
         )
 
-    if "{query}" not in BAFIN_COMPANY_SEARCH_URL_TEMPLATE:
-        raise RuntimeError(
-            "BAFIN_COMPANY_SEARCH_URL_TEMPLATE must contain the placeholder {query}."
-        )
-
-
 # -------------------------------------------------------------------
 # Candidate handling
 # -------------------------------------------------------------------
@@ -105,7 +99,8 @@ def parse_bool(value: str | None) -> bool:
     return value.strip().lower() in {"true", "1", "yes", "y"}
 
 
-def load_candidates(file_path: str) -> listcandidates = []
+def load_candidates(file_path: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
 
     with open(file_path, mode="r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
@@ -135,19 +130,41 @@ def load_candidates(file_path: str) -> listcandidates = []
                 "source_reason": row.get("source_reason"),
                 "priority": row.get("priority"),
                 "enabled": enabled,
+                "bafin_institut_id": row.get("bafin_institut_id"),
+                "bafin_detail_url": row.get("bafin_detail_url"),
             }
 
             candidates.append(candidate)
 
     return candidates
 
+def build_bafin_url(candidate: dict[str, Any]) -> str:
+    detail_url = (candidate.get("bafin_detail_url") or "").strip()
 
-def build_bafin_search_url(search_name: str) -> str:
-    encoded_query = quote_plus(search_name)
+    if detail_url:
+        return detail_url
+
+    institut_id = (candidate.get("bafin_institut_id") or "").strip()
+
+    if institut_id:
+        return (
+            "https://portal.mvp.bafin.de/database/InstInfo/institutDetails.do"
+            f"?cmd=loadInstitutAction&institutId={institut_id}"
+        )
+
+    if not BAFIN_COMPANY_SEARCH_URL_TEMPLATE:
+        raise RuntimeError(
+            "No BaFin detail URL, no institut ID and no search URL template available."
+        )
+
+    if "{query}" not in BAFIN_COMPANY_SEARCH_URL_TEMPLATE:
+        raise RuntimeError(
+            "BAFIN_COMPANY_SEARCH_URL_TEMPLATE must contain the placeholder {query}."
+        )
 
     return BAFIN_COMPANY_SEARCH_URL_TEMPLATE.replace(
         "{query}",
-        encoded_query,
+        quote_plus(candidate["search_name"]),
     )
 
 
@@ -221,9 +238,9 @@ def main() -> None:
             print(f"Candidate {index}/{len(candidates_to_process)}")
             print(f"Search name: {candidate['search_name']}")
 
-            search_url = build_bafin_search_url(candidate["search_name"])
+            source_url = build_bafin_url(candidate)
 
-            result = downloader.download_to_tempfile(search_url)
+            result = downloader.download_to_tempfile(source_url)
             temp_files.append(result.temp_file_path)
 
             extension = determine_bafin_extension(
@@ -240,12 +257,12 @@ def main() -> None:
             safe_search_name = sanitize_for_object_key(candidate["search_name"])
 
             base_path = (
-                f"bafin/company_search/"
-                f"snapshot_type=search_result/"
+                f"bafin/company_detail/"
+                f"snapshot_type=detail_page/"
                 f"load_date={LOAD_DATE}"
             )
 
-            file_stem = f"bafin_search_{safe_candidate_id}_{safe_search_name}"
+            file_stem = f"bafin_detail_{safe_candidate_id}_{safe_search_name}"
 
             data_object_key = f"{base_path}/{file_stem}.{extension}"
             metadata_object_key = f"{base_path}/{file_stem}.metadata.json"
@@ -258,6 +275,8 @@ def main() -> None:
 
             metadata = {
                 "source": "BaFin Unternehmensdatenbank",
+                "bafin_institut_id": candidate.get("bafin_institut_id"),
+                "bafin_detail_url": candidate.get("bafin_detail_url"),
                 "source_name": "bafin_company_search",
                 "candidate_id": candidate["candidate_id"],
                 "lei": candidate.get("lei"),
@@ -267,7 +286,7 @@ def main() -> None:
                 "country": candidate.get("country"),
                 "source_reason": candidate.get("source_reason"),
                 "priority": candidate.get("priority"),
-                "source_url": search_url,
+                "source_url": source_url,
                 "http_status": result.http_status,
                 "content_type": result.content_type,
                 "content_length_header": result.content_length_header,
@@ -288,11 +307,12 @@ def main() -> None:
 
             manifest["files"].append(
                 {
+                    "bafin_institut_id": candidate.get("bafin_institut_id"),
                     "candidate_id": candidate["candidate_id"],
                     "lei": candidate.get("lei"),
                     "legal_name": candidate.get("legal_name"),
                     "search_name": candidate["search_name"],
-                    "source_url": search_url,
+                    "source_url": source_url,
                     "data_object_key": data_object_key,
                     "metadata_object_key": metadata_object_key,
                     "downloaded_bytes": result.downloaded_bytes,
