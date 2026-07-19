@@ -8,13 +8,16 @@ try:
 except ImportError:
     pass
 
+from ingestion.common.download_quality import (
+        run_download_quality_checks, 
+        summarize_quality_checks
+)
 from ingestion.common.minio_client import MinioClient
 from ingestion.common.downloader import HttpDownloader
 from ingestion.common.file_utils import (
     content_type_for_extension,
     sanitize_for_object_key,
 )
-
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ROOT_USER = os.getenv("MINIO_ROOT_USER")
@@ -32,6 +35,8 @@ GLEIF_DOWNLOAD_RR_FULL = os.getenv("GLEIF_DOWNLOAD_RR_FULL", "true").lower() == 
 
 GLEIF_REQUEST_TIMEOUT_SECONDS = int(os.getenv("GLEIF_REQUEST_TIMEOUT_SECONDS", "600"))
 GLEIF_CHUNK_SIZE_BYTES = int(os.getenv("GLEIF_CHUNK_SIZE_BYTES", str(1024 * 1024)))
+GLEIF_MAX_RETRIES = int(os.getenv("GLEIF_MAX_RETRIES", "3"))
+GLEIF_RETRY_SLEEP_SECONDS = int(os.getenv("GLEIF_RETRY_SLEEP_SECONDS", "5"))
 
 LOAD_DT = datetime.now(timezone.utc)
 LOAD_DATE = LOAD_DT.strftime("%Y-%m-%d")
@@ -46,6 +51,12 @@ GLEIF_SOURCES = [
         "url": GLEIF_LEI_FULL_URL,
         "enabled": GLEIF_DOWNLOAD_LEI_FULL,
         "description": "GLEIF LEI Golden Copy full CSV",
+        "quality_expectations": {
+            "expected_extensions": ["zip"],
+            "zip_must_contain_csv": True,
+            "min_expected_bytes": 1000000,
+            "check_utf8_sample": False,
+        },
     },
     {
         "source_name": "gleif_lei_delta_lastday",
@@ -54,6 +65,11 @@ GLEIF_SOURCES = [
         "url": GLEIF_LEI_DELTA_LASTDAY_URL,
         "enabled": GLEIF_DOWNLOAD_LEI_DELTA_LASTDAY,
         "description": "GLEIF LEI Golden Copy LastDay delta CSV",
+        "quality_expectations": {
+            "expected_extensions": ["zip", "csv"],
+            "min_expected_bytes": 1000,
+            "check_utf8_sample": False,
+        },
     },
     {
         "source_name": "gleif_rr_full",
@@ -62,6 +78,12 @@ GLEIF_SOURCES = [
         "url": GLEIF_RR_FULL_URL,
         "enabled": GLEIF_DOWNLOAD_RR_FULL,
         "description": "GLEIF Relationship Records Golden Copy full CSV",
+        "quality_expectations": {
+            "expected_extensions": ["zip"],
+            "zip_must_contain_csv": True,
+            "min_expected_bytes": 1000000,
+            "check_utf8_sample": False,
+        },
     },
 ]
 
@@ -112,6 +134,8 @@ def main() -> None:
     downloader = HttpDownloader(
         timeout_seconds=GLEIF_REQUEST_TIMEOUT_SECONDS,
         chunk_size_bytes=GLEIF_CHUNK_SIZE_BYTES,
+        max_retries=GLEIF_MAX_RETRIES,
+        retry_sleep_seconds=GLEIF_RETRY_SLEEP_SECONDS,
     )
 
     minio.ensure_bucket_exists()
@@ -132,6 +156,10 @@ def main() -> None:
     temp_files = []
 
     for source in enabled_sources:
+        
+        quality_checks = []
+        quality_summary = []
+
         try:
             print("------------------------------------------------------------")
             print(f"Source: {source['source_name']}")
@@ -142,6 +170,19 @@ def main() -> None:
 
             source_name_safe = sanitize_for_object_key(source["source_name"])
             extension = result.extension
+
+            quality_expectations = source.get("quality_expectations", {})
+            quality_checks = run_download_quality_checks(
+                file_path=result.temp_file_path,
+                extension=extension,
+                expectations=quality_expectations,
+            )
+            quality_summary = summarize_quality_checks(quality_checks)
+            if quality_summary["error_count"] > 0:
+                raise RuntimeError(
+                    "Download quality checks failed: "
+                    + json.dumps(quality_checks, indent=2)
+                )
 
             base_path = (
                 f"gleif/{source['dataset_group']}/"
@@ -173,6 +214,8 @@ def main() -> None:
                 "downloaded_bytes": result.downloaded_bytes,
                 "sha256": result.sha256,
                 "file_extension": extension,
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
                 "load_date": LOAD_DATE,
                 "minio_bucket": MINIO_BUCKET,
@@ -195,6 +238,8 @@ def main() -> None:
                     "metadata_object_key": metadata_object_key,
                     "downloaded_bytes": result.downloaded_bytes,
                     "sha256": result.sha256,
+                    "quality_summary": quality_summary,
+                    "quality_checks": quality_checks,
                     "status": "success",
                 }
             )
@@ -209,6 +254,8 @@ def main() -> None:
                 "snapshot_type": source.get("snapshot_type"),
                 "source_url": source.get("url"),
                 "status": "failed",
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "error": str(exc),
             }
 
@@ -221,15 +268,28 @@ def main() -> None:
         file for file in manifest["files"]
         if file.get("status") == "failed"
     ]
+    warning_count = 0
+    error_count = 0
+    for file in manifest["files"]:
+        file_quality_summary = file.get("quality_summary") or {}
+        warning_count += int(file_quality_summary.get("warning_count", 0))
+        error_count += int(file_quality_summary.get("error_count", 0))
 
-    manifest["status"] = "failed" if failed_files else "success"
     manifest["failed_count"] = len(failed_files)
     manifest["success_count"] = len(manifest["files"]) - len(failed_files)
+    manifest["warning_count"] = warning_count
+    manifest["error_count"] = error_count
+
+    if failed_files or error_count > 0:
+        manifest["status"] = "failed"
+    elif warning_count > 0:
+        manifest["status"] = "success_with_warnings"
+    else:
+        manifest["status"] = "success"
 
     manifest_object_key = (
         f"gleif/_manifests/load_date={LOAD_DATE}/download_gleif_manifest.json"
     )
-
     minio.upload_bytes(
         object_key=manifest_object_key,
         content=json.dumps(manifest, indent=2).encode("utf-8"),
@@ -247,12 +307,13 @@ def main() -> None:
     print(f"Job status: {manifest['status']}")
     print(f"Successful files: {manifest['success_count']}")
     print(f"Failed files: {manifest['failed_count']}")
+    print(f"Warnings: {manifest['warning_count']}")
+    print(f"Errors: {manifest['error_count']}")
 
-    if failed_files:
+    if failed_files or error_count > 0:
         raise RuntimeError(
-            f"GLEIF download finished with {len(failed_files)} failed source(s)."
+            f"GLEIF download finished with {len(failed_files)} failed source(s) and {error_count} quality error(s)."
         )
-
 
 if __name__ == "__main__":
     main()

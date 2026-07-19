@@ -8,6 +8,10 @@ try:
 except ImportError:
     pass
 
+from ingestion.common.download_quality import (
+    summarize_quality_checks,
+    run_download_quality_checks,
+)
 from ingestion.common.minio_client import MinioClient
 from ingestion.common.downloader import HttpDownloader
 from ingestion.common.file_utils import (
@@ -34,7 +38,8 @@ OPENSANCTIONS_REQUEST_TIMEOUT_SECONDS = int(
 OPENSANCTIONS_CHUNK_SIZE_BYTES = int(
     os.getenv("OPENSANCTIONS_CHUNK_SIZE_BYTES", str(1024 * 1024))
 )
-
+OPENSANCTIONS_MAX_RETRIES = int(os.getenv("OPENSANCTIONS_MAX_RETRIES", "3"))
+OPENSANCTIONS_RETRY_SLEEP_SECONDS = int(os.getenv("OPENSANCTIONS_RETRY_SLEEP_SECONDS", "5"))
 
 # -------------------------------------------------------------------
 # Runtime values
@@ -98,6 +103,8 @@ def main() -> None:
     downloader = HttpDownloader(
         timeout_seconds=OPENSANCTIONS_REQUEST_TIMEOUT_SECONDS,
         chunk_size_bytes=OPENSANCTIONS_CHUNK_SIZE_BYTES,
+        max_retries=OPENSANCTIONS_MAX_RETRIES,
+        retry_sleep_seconds=OPENSANCTIONS_RETRY_SLEEP_SECONDS,
     )
 
     minio.ensure_bucket_exists()
@@ -117,6 +124,10 @@ def main() -> None:
     temp_files = []
 
     for source in OPENSANCTIONS_SOURCES:
+        
+        quality_checks = []
+        quality_summary = {}
+        
         try:
             print("------------------------------------------------------------")
             print(f"Source: {source['source_name']}")
@@ -127,6 +138,19 @@ def main() -> None:
 
             source_name_safe = sanitize_for_object_key(source["source_name"])
             extension = result.extension
+
+            quality_expectations = source.get("quality_expectations", {})
+            quality_checks = run_download_quality_checks(
+                file_path=result.temp_file_path,
+                extension=extension,
+                expectations=quality_expectations,
+            )
+            quality_summary = summarize_quality_checks(quality_checks)
+            if quality_summary["error_count"] > 0:
+                raise RuntimeError(
+                    "Download quality checks failed: "
+                    + json.dumps(quality_checks, indent=2)
+                )
 
             base_path = (
                 f"opensanctions/{source['dataset_group']}/"
@@ -158,6 +182,8 @@ def main() -> None:
                 "downloaded_bytes": result.downloaded_bytes,
                 "sha256": result.sha256,
                 "file_extension": extension,
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
                 "load_date": LOAD_DATE,
                 "minio_bucket": MINIO_BUCKET,
@@ -180,6 +206,8 @@ def main() -> None:
                     "metadata_object_key": metadata_object_key,
                     "downloaded_bytes": result.downloaded_bytes,
                     "sha256": result.sha256,
+                    "quality_summary": quality_summary,
+                    "quality_checks": quality_checks,
                     "status": "success",
                 }
             )
@@ -194,6 +222,8 @@ def main() -> None:
                 "snapshot_type": source.get("snapshot_type"),
                 "source_url": source.get("url"),
                 "status": "failed",
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "error": str(exc),
             }
 
@@ -207,9 +237,25 @@ def main() -> None:
         if file.get("status") == "failed"
     ]
 
-    manifest["status"] = "failed" if failed_files else "success"
+    warning_count = 0
+    error_count = 0
+
+    for file in manifest["files"]:
+        file_quality_summary = file.get("quality_summary") or {}
+        warning_count += int(file_quality_summary.get("warning_count", 0))
+        error_count += int(file_quality_summary.get("error_count", 0))
+
     manifest["failed_count"] = len(failed_files)
     manifest["success_count"] = len(manifest["files"]) - len(failed_files)
+    manifest["warning_count"] = warning_count
+    manifest["error_count"] = error_count
+
+    if failed_files or error_count > 0:
+        manifest["status"] = "failed"
+    elif warning_count > 0:
+        manifest["status"] = "success_with_warnings"
+    else:
+        manifest["status"] = "success"
 
     manifest_object_key = (
         f"opensanctions/_manifests/load_date={LOAD_DATE}/download_opensanctions_manifest.json"
@@ -232,12 +278,13 @@ def main() -> None:
     print(f"Job status: {manifest['status']}")
     print(f"Successful files: {manifest['success_count']}")
     print(f"Failed files: {manifest['failed_count']}")
+    print(f"Warnings: {manifest['warning_count']}")
+    print(f"Errors: {manifest['error_count']}")
 
-    if failed_files:
+    if failed_files or error_count > 0:
         raise RuntimeError(
-            f"OpenSanctions download finished with {len(failed_files)} failed source(s)."
+            f"OpenSanctions download finished with {len(failed_files)} failed source(s) and {error_count} quality error(s)."
         )
-
 
 if __name__ == "__main__":
     main()

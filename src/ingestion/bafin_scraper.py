@@ -13,6 +13,7 @@ try:
 except ImportError:
     pass
 
+from ingestion.common.download_quality import run_download_quality_checks, summarize_quality_checks
 from ingestion.common.minio_client import MinioClient
 from ingestion.common.downloader import HttpDownloader
 from ingestion.common.file_utils import sanitize_for_object_key
@@ -35,23 +36,12 @@ BAFIN_CANDIDATES_FILE = os.getenv(
 
 BAFIN_COMPANY_SEARCH_URL_TEMPLATE = os.getenv("BAFIN_COMPANY_SEARCH_URL_TEMPLATE")
 
-BAFIN_REQUEST_TIMEOUT_SECONDS = int(
-    os.getenv("BAFIN_REQUEST_TIMEOUT_SECONDS", "120")
-)
-
-BAFIN_CHUNK_SIZE_BYTES = int(
-    os.getenv("BAFIN_CHUNK_SIZE_BYTES", str(1024 * 1024))
-)
-
-BAFIN_SLEEP_SECONDS = float(
-    os.getenv("BAFIN_SLEEP_SECONDS", "3")
-)
-
-BAFIN_MAX_PER_RUN = int(
-    os.getenv("BAFIN_MAX_PER_RUN", "20")
-)
-
-
+BAFIN_REQUEST_TIMEOUT_SECONDS = int(os.getenv("BAFIN_REQUEST_TIMEOUT_SECONDS", "120"))
+BAFIN_CHUNK_SIZE_BYTES = int(os.getenv("BAFIN_CHUNK_SIZE_BYTES", str(1024 * 1024)))
+BAFIN_SLEEP_SECONDS = float(os.getenv("BAFIN_SLEEP_SECONDS", "3"))
+BAFIN_MAX_PER_RUN = int(os.getenv("BAFIN_MAX_PER_RUN", "20"))
+BAFIN_MAX_RETRIES = int(os.getenv("BAFIN_MAX_RETRIES", "3"))
+BAFIN_RETRY_SLEEP_SECONDS = float(os.getenv("BAFIN_RETRY_SLEEP_SECONDS", "5"))
 # -------------------------------------------------------------------
 # Runtime values
 # -------------------------------------------------------------------
@@ -210,6 +200,8 @@ def main() -> None:
         timeout_seconds=BAFIN_REQUEST_TIMEOUT_SECONDS,
         chunk_size_bytes=BAFIN_CHUNK_SIZE_BYTES,
         user_agent="EntityRisk-Navigator/1.0 educational-project defensive-bafin-enrichment",
+        max_retries=BAFIN_MAX_RETRIES,
+        retry_sleep_seconds=BAFIN_RETRY_SLEEP_SECONDS,
     )
 
     minio.ensure_bucket_exists()
@@ -233,6 +225,10 @@ def main() -> None:
     temp_files = []
 
     for index, candidate in enumerate(candidates_to_process, start=1):
+
+        quality_checks = []
+        quality_summary = {}
+
         try:
             print("------------------------------------------------------------")
             print(f"Candidate {index}/{len(candidates_to_process)}")
@@ -252,7 +248,28 @@ def main() -> None:
                 extension=extension,
                 original_content_type=result.content_type,
             )
+            
+            quality_expectations = {
+                "expected_extensions": ["html"],
+                "html_required_markers": ["Unternehmen", "BaFin-ID"],
+                "min_expected_bytes": 500,
+                "check_utf8_sample": True,
+            }
 
+            quality_checks = run_download_quality_checks(
+                file_path=result.temp_file_path,
+                extension=extension,
+                expectations=quality_expectations,
+            )
+
+            quality_summary = summarize_quality_checks(quality_checks)
+
+            if quality_summary["error_count"] > 0:
+                raise RuntimeError(
+                    "Download quality checks failed: "
+                    + json.dumps(quality_checks, indent=2)
+                )
+            
             safe_candidate_id = sanitize_for_object_key(str(candidate["candidate_id"]))
             safe_search_name = sanitize_for_object_key(candidate["search_name"])
 
@@ -293,6 +310,8 @@ def main() -> None:
                 "downloaded_bytes": result.downloaded_bytes,
                 "sha256": result.sha256,
                 "file_extension": extension,
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
                 "load_date": LOAD_DATE,
                 "minio_bucket": MINIO_BUCKET,
@@ -317,6 +336,8 @@ def main() -> None:
                     "metadata_object_key": metadata_object_key,
                     "downloaded_bytes": result.downloaded_bytes,
                     "sha256": result.sha256,
+                    "quality_summary": quality_summary,
+                    "quality_checks": quality_checks,
                     "status": "success",
                 }
             )
@@ -330,6 +351,9 @@ def main() -> None:
                 "lei": candidate.get("lei"),
                 "legal_name": candidate.get("legal_name"),
                 "search_name": candidate.get("search_name"),
+                "bafin_institut_id": candidate.get("bafin_institut_id"),
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "status": "failed",
                 "error": str(exc),
             }
@@ -347,10 +371,25 @@ def main() -> None:
         if file.get("status") == "failed"
     ]
 
-    manifest["status"] = "failed" if failed_files else "success"
+    warning_count = 0
+    error_count = 0
+    for file in manifest["files"]:
+        file_quality_summary = file.get("quality_summary") or {}
+        warning_count += int(file_quality_summary.get("warning_count", 0))
+        error_count += int(file_quality_summary.get("error_count", 0))
+
     manifest["failed_count"] = len(failed_files)
     manifest["success_count"] = len(manifest["files"]) - len(failed_files)
+    manifest["warning_count"] = warning_count
+    manifest["error_count"] = error_count
 
+    if failed_files or error_count > 0:
+        manifest["status"] = "failed"
+    elif warning_count > 0:
+        manifest["status"] = "success_with_warnings"
+    else:
+        manifest["status"] = "success"
+    
     manifest_object_key = (
         f"bafin/_manifests/load_date={LOAD_DATE}/download_bafin_manifest.json"
     )
@@ -372,12 +411,13 @@ def main() -> None:
     print(f"Job status: {manifest['status']}")
     print(f"Successful files: {manifest['success_count']}")
     print(f"Failed files: {manifest['failed_count']}")
+    print(f"Warnings: {manifest['warning_count']}")
+    print(f"Errors: {manifest['error_count']}")
 
-    if failed_files:
+    if failed_files or error_count > 0:
         raise RuntimeError(
-            f"BaFin download finished with {len(failed_files)} failed candidate(s)."
+            f"BaFin download finished with {len(failed_files)} failed candidate(s) and {error_count} error(s)."
         )
-
 
 if __name__ == "__main__":
     main()

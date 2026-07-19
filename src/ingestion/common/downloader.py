@@ -4,6 +4,7 @@ import tempfile
 from dataclasses import dataclass
 
 import requests
+import time
 
 from ingestion.common.file_utils import (
     guess_file_extension_from_url,
@@ -28,25 +29,54 @@ class HttpDownloader:
         timeout_seconds: int = 300,
         chunk_size_bytes: int = 1024 * 1024,
         user_agent: str = "EntityRisk-Navigator/1.0 educational-project",
+        max_retries: int = 3,
+        retry_sleep_seconds: int = 5,
     ):
         self.timeout_seconds = timeout_seconds
         self.chunk_size_bytes = chunk_size_bytes
         self.user_agent = user_agent
+        self.max_retries = max_retries
+        self.retry_sleep_seconds = retry_sleep_seconds
 
     def download_to_tempfile(self, url: str) -> DownloadResult:
         print(f"Downloading: {url}")
 
-        response = requests.get(
-            url,
-            stream=True,
-            timeout=self.timeout_seconds,
-            headers={
-                "User-Agent": self.user_agent,
-                "Accept": "text/csv, application/zip, application/json, application/xml, */*",
-            },
-        )
+        last_exception = None
 
-        response.raise_for_status()
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = requests.get(
+                    url,
+                    stream=True,
+                    timeout=self.timeout_seconds,
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Accept": (
+                            "text/csv, application/zip, application/json, "
+                            "application/xml, text/html, */*"
+                        ),
+                    },
+                )
+
+                response.raise_for_status()
+                break
+
+            except requests.RequestException as exc:
+                last_exception = exc
+
+                if attempt >= self.max_retries:
+                    raise
+
+                sleep_seconds = self.retry_sleep_seconds * attempt
+
+                print(
+                    f"Download attempt {attempt}/{self.max_retries} failed: {exc}. "
+                    f"Retrying in {sleep_seconds} seconds..."
+                )
+
+                time.sleep(sleep_seconds)
+        else:
+            raise RuntimeError(f"Download failed for URL: {url}") from last_exception
 
         content_type = response.headers.get("Content-Type")
         fallback_extension = guess_file_extension_from_url(url, content_type)

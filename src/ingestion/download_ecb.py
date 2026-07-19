@@ -9,6 +9,7 @@ try:
 except ImportError:
     pass
 
+from ingestion.common.download_quality import run_download_quality_checks, summarize_quality_checks
 from ingestion.common.minio_client import MinioClient
 from ingestion.common.downloader import HttpDownloader
 from ingestion.common.file_utils import (
@@ -51,6 +52,12 @@ ECB_SERIES = [
         "frequency": "M",
         "unit": "Percent per annum",
         "enabled": True,
+        "quality_expectations": {
+            "expected_extensions": ["csv"],
+            "required_columns": ["TIME_PERIOD", "OBS_VALUE"],
+            "min_expected_bytes": 50,
+            "check_utf8_sample": True,
+    },
     },
     {
         "dataset_code": ECB_FLOW_EST,
@@ -62,6 +69,12 @@ ECB_SERIES = [
         "frequency": "B",
         "unit": "Percent",
         "enabled": True,
+        "quality_expectations": {
+            "expected_extensions": ["csv"],
+            "required_columns": ["TIME_PERIOD", "OBS_VALUE"],
+            "min_expected_bytes": 50,
+            "check_utf8_sample": True,
+        },
     },
     {
         "dataset_code": ECB_FLOW_YC,
@@ -73,6 +86,12 @@ ECB_SERIES = [
         "frequency": "B",
         "unit": "Percent per annum",
         "enabled": True,
+        "quality_expectations": {
+            "expected_extensions": ["csv"],
+            "required_columns": ["TIME_PERIOD", "OBS_VALUE"],
+            "min_expected_bytes": 50,
+            "check_utf8_sample": True,
+        },
     },
     {
         "dataset_code": ECB_FLOW_YC,
@@ -84,6 +103,12 @@ ECB_SERIES = [
         "frequency": "B",
         "unit": "Percent per annum",
         "enabled": True,
+        "quality_expectations": {
+            "expected_extensions": ["csv"],
+            "required_columns": ["TIME_PERIOD", "OBS_VALUE"],
+            "min_expected_bytes": 50,
+            "check_utf8_sample": True,
+        },
     },
     {
         "dataset_code": ECB_FLOW_BSI,
@@ -92,6 +117,12 @@ ECB_SERIES = [
         "frequency": "M",
         "unit": "To be defined",
         "enabled": bool(os.getenv("ECB_BSI_LOANS_NFC", "").strip()),
+        "quality_expectations": {
+            "expected_extensions": ["csv"],
+            "required_columns": ["TIME_PERIOD", "OBS_VALUE"],
+            "min_expected_bytes": 50,
+            "check_utf8_sample": True,
+        },
     },
     {
         "dataset_code": ECB_FLOW_BSI,
@@ -100,6 +131,12 @@ ECB_SERIES = [
         "frequency": "M",
         "unit": "To be defined",
         "enabled": bool(os.getenv("ECB_BSI_M3", "").strip()),
+        "quality_expectations": {
+            "expected_extensions": ["csv"],
+            "required_columns": ["TIME_PERIOD", "OBS_VALUE"],
+            "min_expected_bytes": 50,
+            "check_utf8_sample": True,
+        },
     },
 ]
 
@@ -177,6 +214,10 @@ def main() -> None:
     temp_files = []
 
     for series in enabled_series:
+
+        quality_checks = []
+        quality_summary = {}
+
         try:
             dataset_code = series["dataset_code"]
             series_key = series["series_key"]
@@ -193,6 +234,22 @@ def main() -> None:
 
             safe_series_key = sanitize_for_object_key(series_key)
             extension = result.extension
+
+            quality_expectations = series.get("quality_expectations", {})
+
+            quality_checks = run_download_quality_checks(
+                file_path=result.temp_file_path,
+                extension=extension,
+                expectations=quality_expectations,
+            )
+
+            quality_summary = summarize_quality_checks(quality_checks)
+
+            if quality_summary["error_count"] > 0:
+                raise RuntimeError(
+                    "Download quality checks failed: "
+                    + json.dumps(quality_checks, indent=2)
+            )
 
             base_path = f"ecb/{dataset_code}/load_date={LOAD_DATE}"
             file_stem = f"{dataset_code}_{safe_series_key}"
@@ -220,6 +277,8 @@ def main() -> None:
                 "downloaded_bytes": result.downloaded_bytes,
                 "sha256": result.sha256,
                 "file_extension": extension,
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
                 "load_date": LOAD_DATE,
                 "minio_bucket": MINIO_BUCKET,
@@ -244,6 +303,8 @@ def main() -> None:
                     "metadata_object_key": metadata_object_key,
                     "downloaded_bytes": result.downloaded_bytes,
                     "sha256": result.sha256,
+                    "quality_summary": quality_summary,
+                    "quality_checks": quality_checks,
                     "status": "success",
                 }
             )
@@ -257,6 +318,8 @@ def main() -> None:
                 "series_key": series.get("series_key"),
                 "indicator_name": series.get("indicator_name"),
                 "status": "failed",
+                "quality_summary": quality_summary,
+                "quality_checks": quality_checks,
                 "error": str(exc),
             }
 
@@ -270,9 +333,25 @@ def main() -> None:
         if file.get("status") == "failed"
     ]
 
-    manifest["status"] = "failed" if failed_files else "success"
+    warning_count = 0
+    error_count = 0
+
+    for file in manifest["files"]:
+        file_quality_summary = file.get("quality_summary") or {}
+        warning_count += int(file_quality_summary.get("warning_count", 0))
+        error_count += int(file_quality_summary.get("error_count", 0))
+
     manifest["failed_count"] = len(failed_files)
     manifest["success_count"] = len(manifest["files"]) - len(failed_files)
+    manifest["warning_count"] = warning_count
+    manifest["error_count"] = error_count
+
+    if failed_files or error_count > 0:
+        manifest["status"] = "failed"
+    elif warning_count > 0:
+        manifest["status"] = "success_with_warnings"
+    else:
+        manifest["status"] = "success"
 
     manifest_object_key = (
         f"ecb/_manifests/load_date={LOAD_DATE}/download_ecb_manifest.json"
@@ -295,10 +374,12 @@ def main() -> None:
     print(f"Job status: {manifest['status']}")
     print(f"Successful files: {manifest['success_count']}")
     print(f"Failed files: {manifest['failed_count']}")
+    print(f"Warnings: {manifest['warning_count']}")
+    print(f"Errors: {manifest['error_count']}")
 
-    if failed_files:
+    if failed_files or error_count > 0:
         raise RuntimeError(
-            f"ECB download finished with {len(failed_files)} failed series."
+            f"ECB download finished with {len(failed_files)} failed series and {error_count} quality check errors."
         )
 
 
