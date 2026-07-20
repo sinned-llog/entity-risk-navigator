@@ -8,13 +8,13 @@ try:
 except ImportError:
     pass
 
-from ingestion.common.download_quality import (
+from common.download_quality import (
         run_download_quality_checks, 
         summarize_quality_checks
 )
-from ingestion.common.minio_client import MinioClient
-from ingestion.common.downloader import HttpDownloader
-from ingestion.common.file_utils import (
+from common.minio_client import MinioClient
+from common.downloader import HttpDownloader
+from common.file_utils import (
     content_type_for_extension,
     sanitize_for_object_key,
 )
