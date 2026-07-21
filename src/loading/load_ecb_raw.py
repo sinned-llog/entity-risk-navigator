@@ -1,10 +1,8 @@
 import os
 import csv
-import json
 from io import StringIO
 from datetime import datetime, date, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
 
 try:
     from dotenv import load_dotenv
@@ -12,32 +10,46 @@ try:
 except ImportError:
     pass
 
-import psycopg2
-from psycopg2.extras import execute_values, Json
+from psycopg2.extras import Json
+
 from common.minio_client import MinioClient
+from common.postgres_client import PostgresClient
+from common.manifest_utils import (
+    find_latest_successful_manifest,
+    evaluate_snapshot_freshness,
+    handle_stale_snapshot,
+)
 
 
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
-MINIO_ROOT_USER = os.getenv("MINIO_ROOT_USER")
-MINIO_ROOT_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET")
+APP_ENV = os.getenv("APP_ENV", "dev")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.getenv("POSTGRES_DB")
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
-APP_ENV = os.getenv("APP_ENV", "dev")
-
 LOAD_DT = datetime.now(timezone.utc)
-DEFAULT_LOAD_DATE = LOAD_DT.strftime("%Y-%m-%d")
+LOAD_TIMESTAMP_UTC = LOAD_DT.isoformat()
 
-ECB_LOAD_DATE = os.getenv("ECB_LOAD_DATE", DEFAULT_LOAD_DATE)
+# If set: load exactly this snapshot.
+# If not set: load latest successful ECB snapshot from MinIO.
+ECB_LOAD_DATE = os.getenv("ECB_LOAD_DATE")
+
+ECB_MAX_SNAPSHOT_AGE_DAYS = int(
+    os.getenv("ECB_MAX_SNAPSHOT_AGE_DAYS", "3")
+)
+
+# Supported values: warn, fail, allow
+ECB_STALE_SNAPSHOT_POLICY = os.getenv(
+    "ECB_STALE_SNAPSHOT_POLICY",
+    "warn",
+).lower()
 
 
 # -------------------------------------------------------------------
@@ -46,11 +58,9 @@ ECB_LOAD_DATE = os.getenv("ECB_LOAD_DATE", DEFAULT_LOAD_DATE)
 
 def validate_environment() -> None:
     required_values = {
-        "MINIO_ENDPOINT": MINIO_ENDPOINT,
-        "MINIO_ROOT_USER": MINIO_ROOT_USER,
-        "MINIO_ROOT_PASSWORD": MINIO_ROOT_PASSWORD,
         "MINIO_BUCKET": MINIO_BUCKET,
         "POSTGRES_HOST": POSTGRES_HOST,
+        "POSTGRES_PORT": POSTGRES_PORT,
         "POSTGRES_DB": POSTGRES_DB,
         "POSTGRES_USER": POSTGRES_USER,
         "POSTGRES_PASSWORD": POSTGRES_PASSWORD,
@@ -63,101 +73,117 @@ def validate_environment() -> None:
             "Missing required environment variables: " + ", ".join(missing)
         )
 
-
-# -------------------------------------------------------------------
-# Clients
-# -------------------------------------------------------------------
-
-def create_postgres_connection():
-    return psycopg2.connect(
-        host=POSTGRES_HOST,
-        port=POSTGRES_PORT,
-        dbname=POSTGRES_DB,
-        user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD,
-    )
+    if ECB_STALE_SNAPSHOT_POLICY not in {"warn", "fail", "allow"}:
+        raise RuntimeError(
+            "ECB_STALE_SNAPSHOT_POLICY must be one of: warn, fail, allow"
+        )
 
 
 # -------------------------------------------------------------------
 # PostgreSQL setup
 # -------------------------------------------------------------------
 
-def ensure_raw_schema_and_table(conn) -> None:
-    ddl = """
-    CREATE SCHEMA IF NOT EXISTS raw;
+def ensure_raw_ecb_table(postgres: PostgresClient) -> None:
+    postgres.ensure_schemas()
 
-    CREATE TABLE IF NOT EXISTS raw.ecb_observations (
-        raw_id BIGSERIAL PRIMARY KEY,
+    postgres.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw.ecb_observations (
+            raw_id BIGSERIAL PRIMARY KEY,
 
-        app_env TEXT,
-        source TEXT,
-        dataset_code TEXT,
-        series_key TEXT,
-        indicator_name TEXT,
-        frequency TEXT,
-        unit TEXT,
+            app_env TEXT,
+            source TEXT,
 
-        dataflow TEXT,
-        freq TEXT,
-        ref_area TEXT,
+            dataset_code TEXT,
+            series_key TEXT,
+            indicator_name TEXT,
+            frequency TEXT,
+            unit TEXT,
 
-        time_period_raw TEXT,
-        obs_date DATE,
-        obs_value_raw TEXT,
-        obs_value NUMERIC,
-        obs_status TEXT,
+            dataflow TEXT,
+            freq TEXT,
+            ref_area TEXT,
 
-        raw_row JSONB,
+            time_period_raw TEXT,
+            obs_date DATE,
 
-        source_url TEXT,
-        source_object_key TEXT,
-        metadata_object_key TEXT,
-        source_load_date DATE,
-        loaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-    );
+            obs_value_raw TEXT,
+            obs_value NUMERIC,
+            obs_status TEXT,
 
-    CREATE INDEX IF NOT EXISTS idx_ecb_observations_series_date
-        ON raw.ecb_observations (series_key, obs_date);
+            raw_row JSONB,
 
-    CREATE INDEX IF NOT EXISTS idx_ecb_observations_load_date
-        ON raw.ecb_observations (source_load_date);
+            source_url TEXT,
+            source_object_key TEXT,
+            metadata_object_key TEXT,
 
-    CREATE INDEX IF NOT EXISTS idx_ecb_observations_source_object
-        ON raw.ecb_observations (source_object_key);
-    """
+            source_load_date DATE,
+            loaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        );
 
-    with conn.cursor() as cursor:
-        cursor.execute(ddl)
+        CREATE INDEX IF NOT EXISTS idx_ecb_observations_series_date
+            ON raw.ecb_observations (series_key, obs_date);
 
-    conn.commit()
+        CREATE INDEX IF NOT EXISTS idx_ecb_observations_load_date
+            ON raw.ecb_observations (source_load_date);
+
+        CREATE INDEX IF NOT EXISTS idx_ecb_observations_source_object
+            ON raw.ecb_observations (source_object_key);
+        """
+    )
 
 
 # -------------------------------------------------------------------
-# Helpers
+# Manifest / freshness helpers
+# ------------------------------------------------------------------
+def resolve_ecb_manifest(
+    minio: MinioClient,
+) -> tuple[str, str, dict, dict]:
+    if ECB_LOAD_DATE:
+        manifest_key = (
+            f"ecb/_manifests/load_date={ECB_LOAD_DATE}/download_ecb_manifest.json"
+        )
+
+        if not minio.object_exists(manifest_key):
+            raise RuntimeError(
+                f"ECB manifest not found in MinIO: "
+                f"s3://{MINIO_BUCKET}/{manifest_key}."
+            )
+
+        manifest = minio.get_json_object(manifest_key)
+        effective_load_date = ECB_LOAD_DATE
+
+    else:
+        print("ECB_LOAD_DATE not set. Searching latest successful ECB manifest in MinIO.")
+
+        manifest_key, effective_load_date, manifest = find_latest_successful_manifest(
+            minio=minio,
+            manifest_prefix="ecb/_manifests/",
+            manifest_filename="download_ecb_manifest.json",
+        )
+
+    freshness = evaluate_snapshot_freshness(
+        effective_load_date=effective_load_date,
+        max_age_days=ECB_MAX_SNAPSHOT_AGE_DAYS,
+        policy=ECB_STALE_SNAPSHOT_POLICY,
+    )
+
+    handle_stale_snapshot(
+        freshness=freshness,
+        source_name="ECB",
+    )
+
+    return manifest_key, effective_load_date, manifest, freshness
+
+
+# -------------------------------------------------------------------
+# Parsing helpers
 # -------------------------------------------------------------------
 
-def get_text_object(s3_client, object_key: str) -> str:
-    response = s3_client.get_object(
-        Bucket=MINIO_BUCKET,
-        Key=object_key,
-    )
-
-    content = response["Body"].read()
-    return content.decode("utf-8-sig", errors="replace")
-
-
-def load_manifest(s3_client, load_date: str) -> dict[str, Any]:
-    manifest_key = (
-        f"ecb/_manifests/load_date={load_date}/download_ecb_manifest.json"
-    )
-
-    text = get_text_object(s3_client, manifest_key)
-    manifest = json.loads(text)
-
-    return manifest
-
-
-def parse_obs_date(time_period_raw: str | None, frequency: str | None) -> date | None:
+def parse_obs_date(
+    time_period_raw: str | None,
+    frequency: str | None,
+) -> date | None:
     if not time_period_raw:
         return None
 
@@ -205,24 +231,31 @@ def read_ecb_csv_rows(csv_text: str) -> list[dict[str, str]]:
     return list(reader)
 
 
-def delete_existing_rows_for_object(conn, source_object_key: str) -> None:
-    with conn.cursor() as cursor:
-        cursor.execute(
-            """
-            DELETE FROM raw.ecb_observations
-            WHERE source_object_key = %s
-            """,
-            (source_object_key,),
-        )
+# -------------------------------------------------------------------
+# Database helpers
+# -------------------------------------------------------------------
 
-    conn.commit()
+def delete_existing_rows_for_object(
+    postgres: PostgresClient,
+    source_object_key: str,
+) -> None:
+    postgres.execute(
+        """
+        DELETE FROM raw.ecb_observations
+        WHERE source_object_key = %s
+        """,
+        (source_object_key,),
+    )
 
 
-def insert_ecb_rows(conn, rows: list[tuple]) -> int:
+def insert_ecb_rows(
+    postgres: PostgresClient,
+    rows: list[tuple],
+) -> int:
     if not rows:
         return 0
 
-    sql = """
+    insert_sql = """
         INSERT INTO raw.ecb_observations (
             app_env,
             source,
@@ -248,11 +281,11 @@ def insert_ecb_rows(conn, rows: list[tuple]) -> int:
         VALUES %s
     """
 
-    with conn.cursor() as cursor:
-        execute_values(cursor, sql, rows, page_size=1000)
-
-    conn.commit()
-    return len(rows)
+    return postgres.execute_values(
+        insert_sql,
+        rows,
+        page_size=1000,
+    )
 
 
 # -------------------------------------------------------------------
@@ -264,15 +297,25 @@ def main() -> None:
 
     print("------------------------------------------------------------")
     print("Loading ECB raw observations")
-    print(f"ECB load date: {ECB_LOAD_DATE}")
+    print(f"Requested ECB_LOAD_DATE: {ECB_LOAD_DATE or 'not set'}")
+    print(f"Stale snapshot policy: {ECB_STALE_SNAPSHOT_POLICY}")
+    print(f"Max snapshot age days: {ECB_MAX_SNAPSHOT_AGE_DAYS}")
 
-    s3_client = create_s3_client()
-    conn = create_postgres_connection()
+    minio = MinioClient.from_env()
+    postgres = PostgresClient.from_env()
 
     try:
-        ensure_raw_schema_and_table(conn)
+        ensure_raw_ecb_table(postgres)
 
-        manifest = load_manifest(s3_client, ECB_LOAD_DATE)
+        manifest_key, effective_load_date, manifest, freshness = resolve_ecb_manifest(
+            minio=minio,
+        )
+
+        print("------------------------------------------------------------")
+        print(f"Using ECB manifest: s3://{MINIO_BUCKET}/{manifest_key}")
+        print(f"Effective ECB load date: {effective_load_date}")
+        print(f"Freshness status: {freshness['freshness_status']}")
+        print(f"Snapshot age days: {freshness['snapshot_age_days']}")
 
         success_files = [
             file
@@ -282,7 +325,7 @@ def main() -> None:
 
         if not success_files:
             raise RuntimeError(
-                f"No successful ECB files found in manifest for load_date={ECB_LOAD_DATE}."
+                f"No successful ECB files found in manifest for load_date={effective_load_date}."
             )
 
         total_inserted = 0
@@ -304,10 +347,15 @@ def main() -> None:
             print("------------------------------------------------------------")
             print(f"Dataset: {dataset_code}")
             print(f"Series key: {series_key}")
+            print(f"Indicator: {indicator_name}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
 
-            csv_text = get_text_object(s3_client, data_object_key)
+            csv_text = minio.get_text_object(data_object_key)
             csv_rows = read_ecb_csv_rows(csv_text)
+
+            if not csv_rows:
+                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
+                continue
 
             prepared_rows = []
 
@@ -336,26 +384,36 @@ def main() -> None:
                         obs_value_raw,
                         obs_value,
                         obs_status,
-                        json.dumps(row),
+                        Json(row),
                         source_url,
                         data_object_key,
                         metadata_object_key,
-                        ECB_LOAD_DATE,
+                        effective_load_date,
                     )
                 )
 
-            delete_existing_rows_for_object(conn, data_object_key)
-            inserted_count = insert_ecb_rows(conn, prepared_rows)
+            delete_existing_rows_for_object(
+                postgres=postgres,
+                source_object_key=data_object_key,
+            )
+
+            inserted_count = insert_ecb_rows(
+                postgres=postgres,
+                rows=prepared_rows,
+            )
+
             total_inserted += inserted_count
 
             print(f"Inserted rows: {inserted_count}")
 
         print("------------------------------------------------------------")
         print("ECB raw load finished successfully.")
+        print(f"Effective ECB load date: {effective_load_date}")
+        print(f"Freshness status: {freshness['freshness_status']}")
         print(f"Total inserted rows: {total_inserted}")
 
     finally:
-        conn.close()
+        postgres.close()
 
 
 if __name__ == "__main__":
