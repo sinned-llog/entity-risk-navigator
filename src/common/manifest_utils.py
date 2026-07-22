@@ -17,6 +17,7 @@ def find_latest_successful_manifest(
     manifest_prefix: str,
     manifest_filename: str,
     allowed_statuses: set[str] | None = None,
+    
 ) -> tuple[str, str, dict[str, Any]]:
     if allowed_statuses is None:
         allowed_statuses = {"success", "success_with_warnings"}

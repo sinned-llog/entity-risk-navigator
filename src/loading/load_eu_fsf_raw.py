@@ -141,7 +141,6 @@ def ensure_raw_eu_fsf_table(postgres: PostgresClient) -> None:
         """
     )
 
-
 # -------------------------------------------------------------------
 # Manifest / freshness helpers
 # -------------------------------------------------------------------
@@ -192,21 +191,21 @@ def resolve_eu_fsf_manifest(
 # -------------------------------------------------------------------
 
 def read_csv_rows(csv_text: str) -> list[dict[str, str]]:
-    sample = csv_text[:4096]
+    reader = csv.DictReader(
+        StringIO(csv_text),
+        delimiter=";",
+        quotechar='"',
+    )
 
-    try:
-        dialect = csv.Sniffer().sniff(sample)
-    except csv.Error:
-        dialect = csv.excel
-
-    reader = csv.DictReader(StringIO(csv_text), dialect=dialect)
     return list(reader)
 
+def normalize_key(value: str | None) -> str:
+    if value is None:
+        return ""
 
-def normalize_key(value: str) -> str:
     return "".join(
         char.lower()
-        for char in value
+        for char in str(value)
         if char.isalnum()
     )
 
@@ -215,10 +214,15 @@ def get_by_possible_keys(
     row: dict[str, str],
     possible_keys: list[str],
 ) -> str | None:
-    normalized_lookup = {
-        normalize_key(key): value
-        for key, value in row.items()
-    }
+    normalized_lookup = {}
+
+    for key, value in row.items():
+        if key is None:
+            continue
+        normalized_key = normalize_key(key)
+
+        if normalized_key:
+            normalized_lookup[normalized_key] = value
 
     for key in possible_keys:
         value = normalized_lookup.get(normalize_key(key))
@@ -228,16 +232,29 @@ def get_by_possible_keys(
 
     return None
 
+def clean_csv_row(row: dict) -> dict:
+    clean_row = {}
+
+    for key, value in row.items():
+        if key is None:
+            clean_row["_extra_fields"] = value
+            continue
+
+        clean_row[str(key)] = value
+
+    return clean_row
 
 def calculate_row_hash(row: dict[str, str]) -> str:
+
+    clean_row = clean_csv_row(row)
+
     normalized = json.dumps(
-        row,
+        clean_row,
         sort_keys=True,
         ensure_ascii=False,
     )
 
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
 
 # -------------------------------------------------------------------
 # Database helpers
@@ -366,8 +383,10 @@ def main() -> None:
             prepared_rows = []
 
             for row_number, row in enumerate(csv_rows, start=1):
+                clean_row = clean_csv_row(row)
+
                 entity_logical_id = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
                         "Entity_LogicalId",
                         "entity_logical_id",
@@ -377,7 +396,7 @@ def main() -> None:
                 )
 
                 eu_reference_number = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
                         "Entity_EU_ReferenceNumber",
                         "eu_reference_number",
@@ -387,7 +406,7 @@ def main() -> None:
                 )
 
                 un_reference_number = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
                         "Entity_UnitedNationId",
                         "un_reference_number",
@@ -397,8 +416,10 @@ def main() -> None:
                 )
 
                 subject_type = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
+                        "Entity_SubjectType_ClassificationCode",
+                        "Entity_SubjectType",
                         "SubjectType_ClassificationCode",
                         "subject_type",
                         "Subject Type",
@@ -407,7 +428,7 @@ def main() -> None:
                 )
 
                 name_alias_whole_name = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
                         "NameAlias_WholeName",
                         "name_alias_whole_name",
@@ -418,8 +439,10 @@ def main() -> None:
                 )
 
                 programme = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
+                        "Entity_Regulation_Programme",
+                        "NameAlias_Regulation_Programme",
                         "Regulation_Programme",
                         "programme",
                         "Programme",
@@ -428,8 +451,10 @@ def main() -> None:
                 )
 
                 regulation_type = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
+                        "Entity_Regulation_Type",
+                        "NameAlias_Regulation_Type",
                         "Regulation_Type",
                         "regulation_type",
                         "Regulation Type",
@@ -437,8 +462,10 @@ def main() -> None:
                 )
 
                 regulation_number_title = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
+                        "Entity_Regulation_NumberTitle",
+                        "NameAlias_Regulation_NumberTitle",
                         "Regulation_NumberTitle",
                         "regulation_number_title",
                         "Regulation Number Title",
@@ -447,7 +474,7 @@ def main() -> None:
                 )
 
                 designation_date_raw = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
                         "Entity_DesignationDate",
                         "designation_date",
@@ -456,8 +483,10 @@ def main() -> None:
                 )
 
                 publication_date_raw = get_by_possible_keys(
-                    row,
+                    clean_row,
                     [
+                        "Entity_Regulation_PublicationDate",
+                        "NameAlias_Regulation_PublicationDate",
                         "Regulation_PublicationDate",
                         "publication_date",
                         "Publication Date",
@@ -472,7 +501,7 @@ def main() -> None:
                         dataset_group,
                         snapshot_type,
                         row_number,
-                        calculate_row_hash(row),
+                        calculate_row_hash(clean_row),
                         entity_logical_id,
                         eu_reference_number,
                         un_reference_number,
@@ -483,7 +512,7 @@ def main() -> None:
                         regulation_number_title,
                         designation_date_raw,
                         publication_date_raw,
-                        Json(row),
+                        Json(clean_row),
                         source_url,
                         data_object_key,
                         metadata_object_key,
