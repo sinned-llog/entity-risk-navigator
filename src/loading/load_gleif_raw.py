@@ -2,8 +2,9 @@ import os
 import csv
 import json
 import zipfile
+import tempfile
 import hashlib
-from io import BytesIO, StringIO, TextIOWrapper
+from io import TextIOWrapper
 from datetime import datetime, timezone
 from typing import Iterator
 
@@ -12,8 +13,6 @@ try:
     load_dotenv()
 except ImportError:
     pass
-
-from psycopg2.extras import Json
 
 from common.minio_client import MinioClient
 from common.postgres_client import PostgresClient
@@ -44,9 +43,7 @@ LOAD_TIMESTAMP_UTC = LOAD_DT.isoformat()
 # If not set: load latest successful GLEIF snapshot from MinIO.
 GLEIF_LOAD_DATE = os.getenv("GLEIF_LOAD_DATE")
 
-GLEIF_MAX_SNAPSHOT_AGE_DAYS = int(
-    os.getenv("GLEIF_MAX_SNAPSHOT_AGE_DAYS", "3")
-)
+GLEIF_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GLEIF_MAX_SNAPSHOT_AGE_DAYS", "3"))
 
 # Supported values: warn, fail, allow
 GLEIF_STALE_SNAPSHOT_POLICY = os.getenv(
@@ -54,10 +51,19 @@ GLEIF_STALE_SNAPSHOT_POLICY = os.getenv(
     "warn",
 ).lower()
 
-GLEIF_LOAD_BATCH_SIZE = int(
-    os.getenv("GLEIF_LOAD_BATCH_SIZE", "5000")
+# Erhöht auf 50.000 für optimale COPY-Performance
+GLEIF_LOAD_BATCH_SIZE = int(os.getenv("GLEIF_LOAD_BATCH_SIZE", "50000"))
+GLEIF_MAX_ROWS_PER_FILE = int(
+    os.getenv("GLEIF_MAX_ROWS_PER_FILE", "0")
 )
 
+GLEIF_REBUILD_INDEXES = (
+    os.getenv("GLEIF_REBUILD_INDEXES", "true").lower() == "true"
+)
+
+GLEIF_STORE_RAW_ROW_JSON = (
+    os.getenv("GLEIF_STORE_RAW_ROW_JSON", "false").lower() == "true"
+)
 
 # -------------------------------------------------------------------
 # Validation
@@ -127,22 +133,6 @@ def ensure_raw_gleif_tables(postgres: PostgresClient) -> None:
             loaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE INDEX IF NOT EXISTS idx_gleif_lei_lei
-            ON raw.gleif_lei (lei);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_lei_legal_name
-            ON raw.gleif_lei (legal_name);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_lei_status
-            ON raw.gleif_lei (entity_status, registration_status);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_lei_load_date
-            ON raw.gleif_lei (source_load_date);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_lei_source_object
-            ON raw.gleif_lei (source_object_key);
-
-
         CREATE TABLE IF NOT EXISTS raw.gleif_rr (
             raw_id BIGSERIAL PRIMARY KEY,
 
@@ -184,26 +174,9 @@ def ensure_raw_gleif_tables(postgres: PostgresClient) -> None:
             source_load_date DATE,
             loaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_rr_start_node
-            ON raw.gleif_rr (start_node_id);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_rr_end_node
-            ON raw.gleif_rr (end_node_id);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_rr_relationship_type
-            ON raw.gleif_rr (relationship_type);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_rr_status
-            ON raw.gleif_rr (relationship_status, registration_status);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_rr_load_date
-            ON raw.gleif_rr (source_load_date);
-
-        CREATE INDEX IF NOT EXISTS idx_gleif_rr_source_object
-            ON raw.gleif_rr (source_object_key);
         """
     )
+
 
 # -------------------------------------------------------------------
 # Manifest / freshness helpers
@@ -315,10 +288,12 @@ def calculate_row_hash(row: dict) -> str:
 
 
 # -------------------------------------------------------------------
-# CSV readers
+# CSV readers (Stream-basiert für minimale Speichernutzung)
 # -------------------------------------------------------------------
 
-def iter_csv_rows_from_zip(zip_bytes: bytes) -> Iteratorwith zipfile.ZipFile(BytesIO(zip_bytes), "r") as zip_file:
+def iter_csv_rows_from_zip_stream(stream) -> Iterator[dict]:
+    """Liest die CSV innerhalb eines ZIP-Archivs zeilenweise."""
+    with zipfile.ZipFile(stream, "r") as zip_file:
         csv_members = [
             name
             for name in zip_file.namelist()
@@ -329,7 +304,6 @@ def iter_csv_rows_from_zip(zip_bytes: bytes) -> Iteratorwith zipfile.ZipFile(Byt
             raise RuntimeError("GLEIF ZIP archive does not contain a CSV file.")
 
         csv_member = csv_members[0]
-
         print(f"CSV member in ZIP: {csv_member}")
 
         with zip_file.open(csv_member, "r") as raw_file:
@@ -339,15 +313,20 @@ def iter_csv_rows_from_zip(zip_bytes: bytes) -> Iteratorwith zipfile.ZipFile(Byt
                 errors="replace",
                 newline="",
             )
-
             reader = csv.DictReader(text_file)
-
             for row in reader:
                 yield row
 
 
-def iter_csv_rows_from_text(csv_text: str) -> Iteratorreader = csv.DictReader(StringIO(csv_text))
-
+def iter_csv_rows_from_text_stream(stream) -> Iterator[dict]:
+    """Liest einen Text-Stream zeilenweise als CSV."""
+    text_file = TextIOWrapper(
+        stream,
+        encoding="utf-8-sig",
+        errors="replace",
+        newline="",
+    )
+    reader = csv.DictReader(text_file)
     for row in reader:
         yield row
 
@@ -386,40 +365,32 @@ def insert_gleif_lei_rows(
     postgres: PostgresClient,
     rows: list[tuple],
 ) -> int:
-    if not rows:
-        return 0
-
-    insert_sql = """
-        INSERT INTO raw.gleif_lei (
-            app_env,
-            source,
-            source_name,
-            dataset_group,
-            snapshot_type,
-            row_number,
-            row_hash,
-            lei,
-            legal_name,
-            entity_status,
-            registration_status,
-            legal_jurisdiction,
-            legal_address_country,
-            headquarters_address_country,
-            next_renewal_date_raw,
-            last_update_date_raw,
-            raw_row,
-            source_url,
-            source_object_key,
-            metadata_object_key,
-            source_load_date
-        )
-        VALUES %s
-    """
-
-    return postgres.execute_values(
-        insert_sql,
-        rows,
-        page_size=1000,
+    return postgres.copy_rows(
+        table_name="raw.gleif_lei",
+        columns=[
+            "app_env",
+            "source",
+            "source_name",
+            "dataset_group",
+            "snapshot_type",
+            "row_number",
+            "row_hash",
+            "lei",
+            "legal_name",
+            "entity_status",
+            "registration_status",
+            "legal_jurisdiction",
+            "legal_address_country",
+            "headquarters_address_country",
+            "next_renewal_date_raw",
+            "last_update_date_raw",
+            "raw_row",
+            "source_url",
+            "source_object_key",
+            "metadata_object_key",
+            "source_load_date",
+        ],
+        rows=rows,
     )
 
 
@@ -427,48 +398,40 @@ def insert_gleif_rr_rows(
     postgres: PostgresClient,
     rows: list[tuple],
 ) -> int:
-    if not rows:
-        return 0
-
-    insert_sql = """
-        INSERT INTO raw.gleif_rr (
-            app_env,
-            source,
-            source_name,
-            dataset_group,
-            snapshot_type,
-            row_number,
-            row_hash,
-            start_node_id,
-            start_node_id_type,
-            end_node_id,
-            end_node_id_type,
-            relationship_type,
-            relationship_status,
-            relationship_period_start_raw,
-            relationship_period_end_raw,
-            relationship_period_type,
-            registration_status,
-            initial_registration_date_raw,
-            last_update_date_raw,
-            next_renewal_date_raw,
-            managing_lou,
-            validation_sources,
-            validation_documents,
-            validation_reference,
-            raw_row,
-            source_url,
-            source_object_key,
-            metadata_object_key,
-            source_load_date
-        )
-        VALUES %s
-    """
-
-    return postgres.execute_values(
-        insert_sql,
-        rows,
-        page_size=1000,
+    return postgres.copy_rows(
+        table_name="raw.gleif_rr",
+        columns=[
+            "app_env",
+            "source",
+            "source_name",
+            "dataset_group",
+            "snapshot_type",
+            "row_number",
+            "row_hash",
+            "start_node_id",
+            "start_node_id_type",
+            "end_node_id",
+            "end_node_id_type",
+            "relationship_type",
+            "relationship_status",
+            "relationship_period_start_raw",
+            "relationship_period_end_raw",
+            "relationship_period_type",
+            "registration_status",
+            "initial_registration_date_raw",
+            "last_update_date_raw",
+            "next_renewal_date_raw",
+            "managing_lou",
+            "validation_sources",
+            "validation_documents",
+            "validation_reference",
+            "raw_row",
+            "source_url",
+            "source_object_key",
+            "metadata_object_key",
+            "source_load_date",
+        ],
+        rows=rows,
     )
 
 
@@ -485,14 +448,7 @@ def map_lei_row(
 ) -> tuple:
     clean_row = clean_csv_row(row)
 
-    lei = get_by_possible_keys(
-        clean_row,
-        [
-            "LEI",
-            "lei",
-        ],
-    )
-
+    lei = get_by_possible_keys(clean_row, ["LEI", "lei"])
     legal_name = get_by_possible_keys(
         clean_row,
         [
@@ -503,7 +459,6 @@ def map_lei_row(
             "legal_name",
         ],
     )
-
     entity_status = get_by_possible_keys(
         clean_row,
         [
@@ -513,7 +468,6 @@ def map_lei_row(
             "entity_status",
         ],
     )
-
     registration_status = get_by_possible_keys(
         clean_row,
         [
@@ -523,7 +477,6 @@ def map_lei_row(
             "registration_status",
         ],
     )
-
     legal_jurisdiction = get_by_possible_keys(
         clean_row,
         [
@@ -533,7 +486,6 @@ def map_lei_row(
             "legal_jurisdiction",
         ],
     )
-
     legal_address_country = get_by_possible_keys(
         clean_row,
         [
@@ -542,7 +494,6 @@ def map_lei_row(
             "legal_address_country",
         ],
     )
-
     headquarters_address_country = get_by_possible_keys(
         clean_row,
         [
@@ -551,7 +502,6 @@ def map_lei_row(
             "headquarters_address_country",
         ],
     )
-
     next_renewal_date_raw = get_by_possible_keys(
         clean_row,
         [
@@ -560,7 +510,6 @@ def map_lei_row(
             "next_renewal_date",
         ],
     )
-
     last_update_date_raw = get_by_possible_keys(
         clean_row,
         [
@@ -587,7 +536,7 @@ def map_lei_row(
         headquarters_address_country,
         next_renewal_date_raw,
         last_update_date_raw,
-        Json(clean_row),
+        json.dumps(clean_row, ensure_ascii=False) if GLEIF_STORE_RAW_ROW_JSON else None,
         file_entry.get("source_url"),
         data_object_key,
         file_entry.get("metadata_object_key"),
@@ -616,7 +565,6 @@ def map_rr_row(
             "start_node_id",
         ],
     )
-
     start_node_id_type = get_by_possible_keys(
         clean_row,
         [
@@ -625,7 +573,6 @@ def map_rr_row(
             "start_node_id_type",
         ],
     )
-
     end_node_id = get_by_possible_keys(
         clean_row,
         [
@@ -634,7 +581,6 @@ def map_rr_row(
             "end_node_id",
         ],
     )
-
     end_node_id_type = get_by_possible_keys(
         clean_row,
         [
@@ -643,7 +589,6 @@ def map_rr_row(
             "end_node_id_type",
         ],
     )
-
     relationship_type = get_by_possible_keys(
         clean_row,
         [
@@ -652,7 +597,6 @@ def map_rr_row(
             "relationship_type",
         ],
     )
-
     relationship_status = get_by_possible_keys(
         clean_row,
         [
@@ -661,7 +605,6 @@ def map_rr_row(
             "relationship_status",
         ],
     )
-
     relationship_period_start_raw = get_by_possible_keys(
         clean_row,
         [
@@ -670,7 +613,6 @@ def map_rr_row(
             "relationship_period_start",
         ],
     )
-
     relationship_period_end_raw = get_by_possible_keys(
         clean_row,
         [
@@ -679,7 +621,6 @@ def map_rr_row(
             "relationship_period_end",
         ],
     )
-
     relationship_period_type = get_by_possible_keys(
         clean_row,
         [
@@ -688,7 +629,6 @@ def map_rr_row(
             "relationship_period_type",
         ],
     )
-
     registration_status = get_by_possible_keys(
         clean_row,
         [
@@ -697,7 +637,6 @@ def map_rr_row(
             "registration_status",
         ],
     )
-
     initial_registration_date_raw = get_by_possible_keys(
         clean_row,
         [
@@ -706,7 +645,6 @@ def map_rr_row(
             "initial_registration_date",
         ],
     )
-
     last_update_date_raw = get_by_possible_keys(
         clean_row,
         [
@@ -715,7 +653,6 @@ def map_rr_row(
             "last_update_date",
         ],
     )
-
     next_renewal_date_raw = get_by_possible_keys(
         clean_row,
         [
@@ -724,7 +661,6 @@ def map_rr_row(
             "next_renewal_date",
         ],
     )
-
     managing_lou = get_by_possible_keys(
         clean_row,
         [
@@ -733,7 +669,6 @@ def map_rr_row(
             "managing_lou",
         ],
     )
-
     validation_sources = get_by_possible_keys(
         clean_row,
         [
@@ -742,7 +677,6 @@ def map_rr_row(
             "validation_sources",
         ],
     )
-
     validation_documents = get_by_possible_keys(
         clean_row,
         [
@@ -751,7 +685,6 @@ def map_rr_row(
             "validation_documents",
         ],
     )
-
     validation_reference = get_by_possible_keys(
         clean_row,
         [
@@ -786,7 +719,7 @@ def map_rr_row(
         validation_sources,
         validation_documents,
         validation_reference,
-        Json(clean_row),
+        json.dumps(clean_row, ensure_ascii=False) if GLEIF_STORE_RAW_ROW_JSON else None,
         file_entry.get("source_url"),
         data_object_key,
         file_entry.get("metadata_object_key"),
@@ -814,6 +747,10 @@ def process_lei_file(
     prepared_rows = []
 
     for row_number, row in enumerate(row_iterator, start=1):
+        if GLEIF_MAX_ROWS_PER_FILE > 0 and row_number > GLEIF_MAX_ROWS_PER_FILE:
+            print(f"Reached GLEIF_MAX_ROWS_PER_FILE={GLEIF_MAX_ROWS_PER_FILE}. Stopping LEI file processing.")
+            break
+
         prepared_rows.append(
             map_lei_row(
                 row=row,
@@ -860,6 +797,10 @@ def process_rr_file(
     prepared_rows = []
 
     for row_number, row in enumerate(row_iterator, start=1):
+        if GLEIF_MAX_ROWS_PER_FILE > 0 and row_number > GLEIF_MAX_ROWS_PER_FILE:
+            print(f"Reached GLEIF_MAX_ROWS_PER_FILE={GLEIF_MAX_ROWS_PER_FILE}. Stopping RR file processing.")
+            break
+
         prepared_rows.append(
             map_rr_row(
                 row=row,
@@ -890,6 +831,98 @@ def process_rr_file(
     return total_inserted
 
 
+def drop_raw_gleif_indexes(postgres: PostgresClient) -> None:
+    postgres.execute(
+        """
+        DROP INDEX IF EXISTS raw.idx_gleif_lei_lei;
+        DROP INDEX IF EXISTS raw.idx_gleif_lei_legal_name;
+        DROP INDEX IF EXISTS raw.idx_gleif_lei_status;
+        DROP INDEX IF EXISTS raw.idx_gleif_lei_load_date;
+        DROP INDEX IF EXISTS raw.idx_gleif_lei_source_object;
+
+        DROP INDEX IF EXISTS raw.idx_gleif_rr_start_node;
+        DROP INDEX IF EXISTS raw.idx_gleif_rr_end_node;
+        DROP INDEX IF EXISTS raw.idx_gleif_rr_relationship_type;
+        DROP INDEX IF EXISTS raw.idx_gleif_rr_status;
+        DROP INDEX IF EXISTS raw.idx_gleif_rr_load_date;
+        DROP INDEX IF EXISTS raw.idx_gleif_rr_source_object;
+        """
+    )
+
+
+def create_raw_gleif_indexes(postgres: PostgresClient) -> None:
+    postgres.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gleif_lei_lei
+            ON raw.gleif_lei (lei);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_lei_legal_name
+            ON raw.gleif_lei (legal_name);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_lei_status
+            ON raw.gleif_lei (entity_status, registration_status);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_lei_load_date
+            ON raw.gleif_lei (source_load_date);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_lei_source_object
+            ON raw.gleif_lei (source_object_key);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_rr_start_node
+            ON raw.gleif_rr (start_node_id);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_rr_end_node
+            ON raw.gleif_rr (end_node_id);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_rr_relationship_type
+            ON raw.gleif_rr (relationship_type);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_rr_status
+            ON raw.gleif_rr (relationship_status, registration_status);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_rr_load_date
+            ON raw.gleif_rr (source_load_date);
+
+        CREATE INDEX IF NOT EXISTS idx_gleif_rr_source_object
+            ON raw.gleif_rr (source_object_key);
+        """
+    )
+
+def process_gleif_file_rows(
+    postgres: PostgresClient,
+    row_iterator: Iterator[dict],
+    file_entry: dict,
+    data_object_key: str,
+    effective_load_date: str,
+) -> tuple[int, int]:
+    dataset_group = file_entry.get("dataset_group")
+
+    if dataset_group == "lei":
+        inserted_count = process_lei_file(
+            postgres=postgres,
+            row_iterator=row_iterator,
+            file_entry=file_entry,
+            data_object_key=data_object_key,
+            effective_load_date=effective_load_date,
+        )
+
+        print(f"Inserted LEI rows for file: {inserted_count}")
+        return inserted_count, 0
+
+    if dataset_group == "rr":
+        inserted_count = process_rr_file(
+            postgres=postgres,
+            row_iterator=row_iterator,
+            file_entry=file_entry,
+            data_object_key=data_object_key,
+            effective_load_date=effective_load_date,
+        )
+
+        print(f"Inserted RR rows for file: {inserted_count}")
+        return 0, inserted_count
+
+    print(f"WARNING: unsupported GLEIF dataset_group: {dataset_group}")
+    return 0, 0
 # -------------------------------------------------------------------
 # Main job
 # -------------------------------------------------------------------
@@ -903,12 +936,19 @@ def main() -> None:
     print(f"Stale snapshot policy: {GLEIF_STALE_SNAPSHOT_POLICY}")
     print(f"Max snapshot age days: {GLEIF_MAX_SNAPSHOT_AGE_DAYS}")
     print(f"Batch size: {GLEIF_LOAD_BATCH_SIZE}")
+    print(f"Max rows per file: {GLEIF_MAX_ROWS_PER_FILE or 'unlimited'}")
+    print(f"Rebuild indexes: {GLEIF_REBUILD_INDEXES}")
+    print(f"Store raw_row JSON: {GLEIF_STORE_RAW_ROW_JSON}")
 
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
     try:
         ensure_raw_gleif_tables(postgres)
+
+        if GLEIF_REBUILD_INDEXES:
+            print("Dropping GLEIF indexes before load.")
+            drop_raw_gleif_indexes(postgres)
 
         manifest_key, effective_load_date, manifest, freshness = resolve_gleif_manifest(
             minio=minio,
@@ -949,40 +989,56 @@ def main() -> None:
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
 
             if data_object_key.lower().endswith(".zip"):
-                zip_bytes = minio.get_object_bytes(data_object_key)
-                row_iterator = iter_csv_rows_from_zip(zip_bytes)
-            else:
-                csv_text = minio.get_text_object(data_object_key)
-                row_iterator = iter_csv_rows_from_text(csv_text)
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    local_zip_path = os.path.join(
+                        tmp_dir,
+                        os.path.basename(data_object_key),
+                    )
 
-            if dataset_group == "lei":
-                inserted_count = process_lei_file(
-                    postgres=postgres,
-                    row_iterator=row_iterator,
-                    file_entry=file_entry,
-                    data_object_key=data_object_key,
-                    effective_load_date=effective_load_date,
-                )
+                    print(f"Downloading ZIP object to temporary file: {local_zip_path}")
 
-                total_lei_inserted += inserted_count
+                    minio.download_object_to_file(
+                        object_key=data_object_key,
+                        local_file_path=local_zip_path,
+                    )
 
-                print(f"Inserted LEI rows for file: {inserted_count}")
+                    with open(local_zip_path, "rb") as local_zip_file:
+                        row_iterator = iter_csv_rows_from_zip_stream(local_zip_file)
 
-            elif dataset_group == "rr":
-                inserted_count = process_rr_file(
-                    postgres=postgres,
-                    row_iterator=row_iterator,
-                    file_entry=file_entry,
-                    data_object_key=data_object_key,
-                    effective_load_date=effective_load_date,
-                )
+                        lei_count, rr_count = process_gleif_file_rows(
+                            postgres=postgres,
+                            row_iterator=row_iterator,
+                            file_entry=file_entry,
+                            data_object_key=data_object_key,
+                            effective_load_date=effective_load_date,
+                        )
 
-                total_rr_inserted += inserted_count
-
-                print(f"Inserted RR rows for file: {inserted_count}")
+                        total_lei_inserted += lei_count
+                        total_rr_inserted += rr_count
 
             else:
-                print(f"WARNING: unsupported GLEIF dataset_group: {dataset_group}")
+                stream = minio.get_object_stream(data_object_key)
+
+                try:
+                    row_iterator = iter_csv_rows_from_text_stream(stream)
+
+                    lei_count, rr_count = process_gleif_file_rows(
+                        postgres=postgres,
+                        row_iterator=row_iterator,
+                        file_entry=file_entry,
+                        data_object_key=data_object_key,
+                        effective_load_date=effective_load_date,
+                    )
+
+                    total_lei_inserted += lei_count
+                    total_rr_inserted += rr_count
+
+                finally:
+                    stream.close()
+
+        if GLEIF_REBUILD_INDEXES:
+            print("Creating GLEIF indexes after load.")
+            create_raw_gleif_indexes(postgres)
 
         print("------------------------------------------------------------")
         print("GLEIF raw load finished successfully.")

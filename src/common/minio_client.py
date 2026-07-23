@@ -29,8 +29,6 @@ class MinioClient:
 
     @classmethod
     def from_env(cls) -> "MinioClient":
-        import os
-
         return cls(
             endpoint=os.getenv("MINIO_ENDPOINT"),
             access_key=os.getenv("MINIO_ROOT_USER"),
@@ -71,21 +69,84 @@ class MinioClient:
             Body=content,
             ContentType=content_type,
         )
-    
+
+    def get_object_stream(self, object_key: str):
+        """
+        Gibt einen StreamingBody zurück.
+
+        Geeignet für:
+        - große CSV-Dateien
+        - Textdateien
+        - zeilenweises Lesen
+
+        Wichtig:
+        Der Aufrufer muss den Stream schließen:
+
+            stream = minio.get_object_stream(key)
+            try:
+                ...
+            finally:
+                stream.close()
+
+        Nicht ideal für ZIP-Dateien mit zipfile.ZipFile, weil ZIP-Dateien
+        normalerweise einen seekable Stream brauchen.
+        """
+        response = self.client.get_object(
+            Bucket=self.bucket,
+            Key=object_key,
+        )
+        return response["Body"]
+
+    def download_object_to_file(
+        self,
+        object_key: str,
+        local_file_path: str,
+    ) -> None:
+        """
+        Lädt ein Objekt direkt in eine lokale Datei.
+
+        Das ist der empfohlene Weg für große ZIP-Dateien, weil zipfile.ZipFile
+        einen seekable File-Handle erwartet und du so nicht das komplette ZIP
+        in den RAM laden musst.
+        """
+        self.client.download_file(
+            Bucket=self.bucket,
+            Key=object_key,
+            Filename=local_file_path,
+        )
+
     def get_object_bytes(self, object_key: str) -> bytes:
-        response = self.client.get_object(Bucket=self.bucket, Key=object_key)
-        return response['Body'].read()
-    
-    def get_text_object(self, object_key: str, encoding: str = "utf-8-sig") -> str:
+        """
+        Lädt ein Objekt vollständig in den Speicher.
+
+        Nur für kleine Dateien verwenden, z. B. JSON-Manifeste.
+        Für große CSV/ZIP-Dateien besser get_object_stream() oder
+        download_object_to_file() nutzen.
+        """
+        response = self.client.get_object(
+            Bucket=self.bucket,
+            Key=object_key,
+        )
+
+        body = response["Body"]
+
+        try:
+            return body.read()
+        finally:
+            body.close()
+
+    def get_text_object(
+        self,
+        object_key: str,
+        encoding: str = "utf-8-sig",
+    ) -> str:
         content = self.get_object_bytes(object_key)
-        
-        return content.decode(encoding, errors='replace')
-    
+        return content.decode(encoding, errors="replace")
+
     def get_json_object(self, object_key: str) -> dict:
         text = self.get_text_object(object_key)
-
         return json.loads(text)
-    
+
     def object_exists(self, object_key: str) -> bool:
         try:
             self.client.head_object(
@@ -93,8 +154,13 @@ class MinioClient:
                 Key=object_key,
             )
             return True
-        except ClientError:
-            return False
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+
+            if error_code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+
+            raise
 
     def list_objects(self, prefix: str) -> list:
         object_keys = []

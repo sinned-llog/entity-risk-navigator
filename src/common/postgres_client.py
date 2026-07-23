@@ -1,8 +1,8 @@
 import os
-from typing import Sequence, Any
-
 import psycopg2
 from psycopg2.extras import execute_values
+from typing import Sequence, Any
+from io import StringIO
 
 
 class PostgresClient:
@@ -115,3 +115,56 @@ class PostgresClient:
             CREATE SCHEMA IF NOT EXISTS audit;
             """
         )
+
+    def copy_rows(
+        self,
+        table_name: str,
+        columns: list[str],
+        rows: list[tuple],
+        null_marker: str = "\\N",
+    ) -> int:
+        if not rows:
+            return 0
+
+        self.connect()
+
+        buffer = StringIO()
+
+        # Performantes Erzeugen von TSV-Zeilen (Tab-Separated Values)
+        for row in rows:
+            formatted_values = []
+            for val in row:
+                if val is None:
+                    formatted_values.append(null_marker)
+                else:
+                    # Strings für Postgres Text-Format escapen (\, \t, \n, \r)
+                    val_str = (
+                        str(val)
+                        .replace("\\", "\\\\")
+                        .replace("\t", "\\t")
+                        .replace("\n", "\\n")
+                        .replace("\r", "\\r")
+                    )
+                    formatted_values.append(val_str)
+            
+            buffer.write("\t".join(formatted_values) + "\n")
+
+        buffer.seek(0)
+        columns_sql = ", ".join(columns)
+
+        # Schnelles Postgres TEXT COPY (ohne CSV-Overhead)
+        copy_sql = f"""
+            COPY {table_name} ({columns_sql})
+            FROM STDIN
+            WITH (
+                FORMAT text,
+                NULL '{null_marker}'
+            )
+        """
+
+        with self.conn.cursor() as cursor:
+            cursor.copy_expert(copy_sql, buffer)
+
+        self.conn.commit()
+
+        return len(rows)
