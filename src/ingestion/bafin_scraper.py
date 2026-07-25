@@ -17,8 +17,12 @@ from common.download_quality import run_download_quality_checks, summarize_quali
 from common.minio_client import MinioClient
 from common.downloader import HttpDownloader
 from common.file_utils import sanitize_for_object_key
-
-
+from common.postgres_client import PostgresClient
+from common.audit_logger import (
+    start_job_run,
+    finish_job_run_success,
+    finish_job_run_failure,
+)
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
@@ -182,244 +186,344 @@ def determine_bafin_content_type(extension: str, original_content_type: str | No
 def main() -> None:
     validate_environment()
 
-    candidates = load_candidates(BAFIN_CANDIDATES_FILE)
+    postgres = PostgresClient.from_env()
+    job_run_id = None
+    manifest_object_key = None
+    manifest = None
+    failure_audited = False
 
-    if not candidates:
-        raise RuntimeError("No enabled BaFin candidates found.")
+    try:
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="download_bafin",
+            job_type="download",
+            source="BaFin Unternehmensdatenbank",
+            target_system="minio",
+            app_env=APP_ENV,
+            metadata_json={
+                "candidate_file": BAFIN_CANDIDATES_FILE,
+                "max_per_run": BAFIN_MAX_PER_RUN,
+                "sleep_seconds": BAFIN_SLEEP_SECONDS,
+                "request_timeout_seconds": BAFIN_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": BAFIN_MAX_RETRIES,
+                "retry_sleep_seconds": BAFIN_RETRY_SLEEP_SECONDS,
+            },
+        )
 
-    candidates_to_process = candidates[:BAFIN_MAX_PER_RUN]
+        candidates = load_candidates(BAFIN_CANDIDATES_FILE)
 
-    minio = MinioClient(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ROOT_USER,
-        secret_key=MINIO_ROOT_PASSWORD,
-        bucket=MINIO_BUCKET,
-    )
+        if not candidates:
+            raise RuntimeError("No enabled BaFin candidates found.")
 
-    downloader = HttpDownloader(
-        timeout_seconds=BAFIN_REQUEST_TIMEOUT_SECONDS,
-        chunk_size_bytes=BAFIN_CHUNK_SIZE_BYTES,
-        user_agent="EntityRisk-Navigator/1.0 educational-project defensive-bafin-enrichment",
-        max_retries=BAFIN_MAX_RETRIES,
-        retry_sleep_seconds=BAFIN_RETRY_SLEEP_SECONDS,
-    )
+        candidates_to_process = candidates[:BAFIN_MAX_PER_RUN]
 
-    minio.ensure_bucket_exists()
+        minio = MinioClient(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ROOT_USER,
+            secret_key=MINIO_ROOT_PASSWORD,
+            bucket=MINIO_BUCKET,
+        )
 
-    manifest = {
-        "job_name": "download_bafin",
-        "app_env": APP_ENV,
-        "source": "BaFin Unternehmensdatenbank",
-        "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
-        "load_date": LOAD_DATE,
-        "bucket": MINIO_BUCKET,
-        "candidate_file": BAFIN_CANDIDATES_FILE,
-        "candidate_count_total_enabled": len(candidates),
-        "candidate_count_processed": len(candidates_to_process),
-        "max_per_run": BAFIN_MAX_PER_RUN,
-        "sleep_seconds": BAFIN_SLEEP_SECONDS,
-        "files": [],
-        "status": "running",
-    }
+        downloader = HttpDownloader(
+            timeout_seconds=BAFIN_REQUEST_TIMEOUT_SECONDS,
+            chunk_size_bytes=BAFIN_CHUNK_SIZE_BYTES,
+            user_agent="EntityRisk-Navigator/1.0 educational-project defensive-bafin-enrichment",
+            max_retries=BAFIN_MAX_RETRIES,
+            retry_sleep_seconds=BAFIN_RETRY_SLEEP_SECONDS,
+        )
 
-    temp_files = []
+        minio.ensure_bucket_exists()
 
-    for index, candidate in enumerate(candidates_to_process, start=1):
+        manifest = {
+            "job_name": "download_bafin",
+            "app_env": APP_ENV,
+            "source": "BaFin Unternehmensdatenbank",
+            "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
+            "load_date": LOAD_DATE,
+            "bucket": MINIO_BUCKET,
+            "candidate_file": BAFIN_CANDIDATES_FILE,
+            "candidate_count_total_enabled": len(candidates),
+            "candidate_count_processed": len(candidates_to_process),
+            "max_per_run": BAFIN_MAX_PER_RUN,
+            "sleep_seconds": BAFIN_SLEEP_SECONDS,
+            "files": [],
+            "status": "running",
+        }
 
-        quality_checks = []
-        quality_summary = {}
+        temp_files = []
 
-        try:
-            print("------------------------------------------------------------")
-            print(f"Candidate {index}/{len(candidates_to_process)}")
-            print(f"Search name: {candidate['search_name']}")
+        for index, candidate in enumerate(candidates_to_process, start=1):
 
-            source_url = build_bafin_url(candidate)
+            quality_checks = []
+            quality_summary = {}
 
-            result = downloader.download_to_tempfile(source_url)
-            temp_files.append(result.temp_file_path)
+            try:
+                print("------------------------------------------------------------")
+                print(f"Candidate {index}/{len(candidates_to_process)}")
+                print(f"Search name: {candidate['search_name']}")
 
-            extension = determine_bafin_extension(
-                content_type=result.content_type,
-                fallback_extension=result.extension,
-            )
+                source_url = build_bafin_url(candidate)
 
-            content_type = determine_bafin_content_type(
-                extension=extension,
-                original_content_type=result.content_type,
-            )
-            
-            quality_expectations = {
-                "expected_extensions": ["html"],
-                "html_required_markers": ["Unternehmen", "BaFin-ID"],
-                "min_expected_bytes": 500,
-                "check_utf8_sample": True,
-            }
+                result = downloader.download_to_tempfile(source_url)
+                temp_files.append(result.temp_file_path)
 
-            quality_checks = run_download_quality_checks(
-                file_path=result.temp_file_path,
-                extension=extension,
-                expectations=quality_expectations,
-            )
-
-            quality_summary = summarize_quality_checks(quality_checks)
-
-            if quality_summary["error_count"] > 0:
-                raise RuntimeError(
-                    "Download quality checks failed: "
-                    + json.dumps(quality_checks, indent=2)
+                extension = determine_bafin_extension(
+                    content_type=result.content_type,
+                    fallback_extension=result.extension,
                 )
-            
-            safe_candidate_id = sanitize_for_object_key(str(candidate["candidate_id"]))
-            safe_search_name = sanitize_for_object_key(candidate["search_name"])
 
-            base_path = (
-                f"bafin/company_detail/"
-                f"snapshot_type=detail_page/"
-                f"load_date={LOAD_DATE}"
-            )
+                content_type = determine_bafin_content_type(
+                    extension=extension,
+                    original_content_type=result.content_type,
+                )
+                
+                quality_expectations = {
+                    "expected_extensions": ["html"],
+                    "html_required_markers": ["Unternehmen", "BaFin-ID"],
+                    "min_expected_bytes": 500,
+                    "check_utf8_sample": True,
+                }
 
-            file_stem = f"bafin_detail_{safe_candidate_id}_{safe_search_name}"
+                quality_checks = run_download_quality_checks(
+                    file_path=result.temp_file_path,
+                    extension=extension,
+                    expectations=quality_expectations,
+                )
 
-            data_object_key = f"{base_path}/{file_stem}.{extension}"
-            metadata_object_key = f"{base_path}/{file_stem}.metadata.json"
+                quality_summary = summarize_quality_checks(quality_checks)
 
-            minio.upload_file(
-                object_key=data_object_key,
-                local_file_path=result.temp_file_path,
-                content_type=content_type,
-            )
+                if quality_summary["error_count"] > 0:
+                    raise RuntimeError(
+                        "Download quality checks failed: "
+                        + json.dumps(quality_checks, indent=2)
+                    )
+                
+                safe_candidate_id = sanitize_for_object_key(str(candidate["candidate_id"]))
+                safe_search_name = sanitize_for_object_key(candidate["search_name"])
 
-            metadata = {
-                "source": "BaFin Unternehmensdatenbank",
-                "bafin_institut_id": candidate.get("bafin_institut_id"),
-                "bafin_detail_url": candidate.get("bafin_detail_url"),
-                "source_name": "bafin_company_search",
-                "candidate_id": candidate["candidate_id"],
-                "lei": candidate.get("lei"),
-                "legal_name": candidate.get("legal_name"),
-                "search_name": candidate["search_name"],
-                "jurisdiction": candidate.get("jurisdiction"),
-                "country": candidate.get("country"),
-                "source_reason": candidate.get("source_reason"),
-                "priority": candidate.get("priority"),
-                "source_url": source_url,
-                "http_status": result.http_status,
-                "content_type": result.content_type,
-                "content_length_header": result.content_length_header,
-                "downloaded_bytes": result.downloaded_bytes,
-                "sha256": result.sha256,
-                "file_extension": extension,
-                "quality_summary": quality_summary,
-                "quality_checks": quality_checks,
-                "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
-                "load_date": LOAD_DATE,
-                "minio_bucket": MINIO_BUCKET,
-                "minio_object_key": data_object_key,
-            }
+                base_path = (
+                    f"bafin/company_detail/"
+                    f"snapshot_type=detail_page/"
+                    f"load_date={LOAD_DATE}"
+                )
 
-            minio.upload_bytes(
-                object_key=metadata_object_key,
-                content=json.dumps(metadata, indent=2).encode("utf-8"),
-                content_type="application/json",
-            )
+                file_stem = f"bafin_detail_{safe_candidate_id}_{safe_search_name}"
 
-            manifest["files"].append(
-                {
+                data_object_key = f"{base_path}/{file_stem}.{extension}"
+                metadata_object_key = f"{base_path}/{file_stem}.metadata.json"
+
+                minio.upload_file(
+                    object_key=data_object_key,
+                    local_file_path=result.temp_file_path,
+                    content_type=content_type,
+                )
+
+                metadata = {
+                    "source": "BaFin Unternehmensdatenbank",
                     "bafin_institut_id": candidate.get("bafin_institut_id"),
+                    "bafin_detail_url": candidate.get("bafin_detail_url"),
+                    "source_name": "bafin_company_search",
                     "candidate_id": candidate["candidate_id"],
                     "lei": candidate.get("lei"),
                     "legal_name": candidate.get("legal_name"),
                     "search_name": candidate["search_name"],
+                    "jurisdiction": candidate.get("jurisdiction"),
+                    "country": candidate.get("country"),
+                    "source_reason": candidate.get("source_reason"),
+                    "priority": candidate.get("priority"),
                     "source_url": source_url,
-                    "data_object_key": data_object_key,
-                    "metadata_object_key": metadata_object_key,
+                    "http_status": result.http_status,
+                    "content_type": result.content_type,
+                    "content_length_header": result.content_length_header,
                     "downloaded_bytes": result.downloaded_bytes,
                     "sha256": result.sha256,
+                    "file_extension": extension,
                     "quality_summary": quality_summary,
                     "quality_checks": quality_checks,
-                    "status": "success",
+                    "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
+                    "load_date": LOAD_DATE,
+                    "minio_bucket": MINIO_BUCKET,
+                    "minio_object_key": data_object_key,
                 }
+
+                minio.upload_bytes(
+                    object_key=metadata_object_key,
+                    content=json.dumps(metadata, indent=2).encode("utf-8"),
+                    content_type="application/json",
+                )
+
+                manifest["files"].append(
+                    {
+                        "bafin_institut_id": candidate.get("bafin_institut_id"),
+                        "candidate_id": candidate["candidate_id"],
+                        "lei": candidate.get("lei"),
+                        "legal_name": candidate.get("legal_name"),
+                        "search_name": candidate["search_name"],
+                        "source_url": source_url,
+                        "data_object_key": data_object_key,
+                        "metadata_object_key": metadata_object_key,
+                        "downloaded_bytes": result.downloaded_bytes,
+                        "sha256": result.sha256,
+                        "quality_summary": quality_summary,
+                        "quality_checks": quality_checks,
+                        "status": "success",
+                    }
+                )
+
+                print(f"Uploaded data: s3://{MINIO_BUCKET}/{data_object_key}")
+                print(f"Uploaded metadata: s3://{MINIO_BUCKET}/{metadata_object_key}")
+
+            except Exception as exc:
+                error_entry = {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "lei": candidate.get("lei"),
+                    "legal_name": candidate.get("legal_name"),
+                    "search_name": candidate.get("search_name"),
+                    "bafin_institut_id": candidate.get("bafin_institut_id"),
+                    "quality_summary": quality_summary,
+                    "quality_checks": quality_checks,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+
+                manifest["files"].append(error_entry)
+
+                print("Download/upload failed:")
+                print(json.dumps(error_entry, indent=2))
+
+            if index < len(candidates_to_process):
+                time.sleep(BAFIN_SLEEP_SECONDS)
+
+        failed_files = [
+            file for file in manifest["files"]
+            if file.get("status") == "failed"
+        ]
+
+        warning_count = 0
+        error_count = 0
+        for file in manifest["files"]:
+            file_quality_summary = file.get("quality_summary") or {}
+            warning_count += int(file_quality_summary.get("warning_count", 0))
+            error_count += int(file_quality_summary.get("error_count", 0))
+
+        manifest["failed_count"] = len(failed_files)
+        manifest["success_count"] = len(manifest["files"]) - len(failed_files)
+        manifest["warning_count"] = warning_count
+        manifest["error_count"] = error_count
+
+        if manifest["success_count"] > 0 and (failed_files or error_count > 0):
+            manifest["status"] = "success_with_warnings"
+        elif failed_files or error_count > 0:
+            manifest["status"] = "failed"
+        elif warning_count > 0:
+            manifest["status"] = "success_with_warnings"
+        else:
+            manifest["status"] = "success"
+        
+        manifest_object_key = (
+            f"bafin/_manifests/load_date={LOAD_DATE}/download_bafin_manifest.json"
+        )
+
+        minio.upload_bytes(
+            object_key=manifest_object_key,
+            content=json.dumps(manifest, indent=2).encode("utf-8"),
+            content_type="application/json",
+        )
+
+        for temp_file_path in temp_files:
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+
+        print("------------------------------------------------------------")
+        print(f"Manifest uploaded: s3://{MINIO_BUCKET}/{manifest_object_key}")
+        print(f"Job status: {manifest['status']}")
+        print(f"Successful files: {manifest['success_count']}")
+        print(f"Failed files: {manifest['failed_count']}")
+        print(f"Warnings: {manifest['warning_count']}")
+        print(f"Errors: {manifest['error_count']}")
+
+        downloaded_bytes_total = sum(
+            int(file.get("downloaded_bytes") or 0)
+            for file in manifest.get("files", [])
+            if file.get("status") == "success"
+        )
+
+        if manifest["status"] == "failed":
+            error_message = (
+                f"{manifest['job_name']} failed with "
+                f"{len(failed_files)} failed source(s) "
+                f"and {error_count} quality error(s)."
             )
 
-            print(f"Uploaded data: s3://{MINIO_BUCKET}/{data_object_key}")
-            print(f"Uploaded metadata: s3://{MINIO_BUCKET}/{metadata_object_key}")
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=error_message,
+                manifest_key=manifest_object_key,
+                effective_load_date=LOAD_DATE,
+                files_discovered=manifest.get("source_count_enabled"),
+                files_processed=len(manifest.get("files", [])),
+                files_success=manifest.get("success_count"),
+                files_failed=manifest.get("failed_count"),
+                downloaded_bytes=downloaded_bytes_total,
+                warning_count=manifest.get("warning_count"),
+                error_count=manifest.get("error_count"),
+                metadata_json={
+                    "bucket": MINIO_BUCKET,
+                    "source": manifest.get("source"),
+                    "load_date": LOAD_DATE,
+                    "manifest_status": manifest.get("status"),
+                },
+            )
 
-        except Exception as exc:
-            error_entry = {
-                "candidate_id": candidate.get("candidate_id"),
-                "lei": candidate.get("lei"),
-                "legal_name": candidate.get("legal_name"),
-                "search_name": candidate.get("search_name"),
-                "bafin_institut_id": candidate.get("bafin_institut_id"),
-                "quality_summary": quality_summary,
-                "quality_checks": quality_checks,
-                "status": "failed",
-                "error": str(exc),
-            }
+            failure_audited = True
 
-            manifest["files"].append(error_entry)
+            raise RuntimeError(error_message)
 
-            print("Download/upload failed:")
-            print(json.dumps(error_entry, indent=2))
-
-        if index < len(candidates_to_process):
-            time.sleep(BAFIN_SLEEP_SECONDS)
-
-    failed_files = [
-        file for file in manifest["files"]
-        if file.get("status") == "failed"
-    ]
-
-    warning_count = 0
-    error_count = 0
-    for file in manifest["files"]:
-        file_quality_summary = file.get("quality_summary") or {}
-        warning_count += int(file_quality_summary.get("warning_count", 0))
-        error_count += int(file_quality_summary.get("error_count", 0))
-
-    manifest["failed_count"] = len(failed_files)
-    manifest["success_count"] = len(manifest["files"]) - len(failed_files)
-    manifest["warning_count"] = warning_count
-    manifest["error_count"] = error_count
-
-    if manifest["success_count"] > 0 and (failed_files or error_count > 0):
-        manifest["status"] = "success_with_warnings"
-    elif failed_files or error_count > 0:
-        manifest["status"] = "failed"
-    elif warning_count > 0:
-        manifest["status"] = "success_with_warnings"
-    else:
-        manifest["status"] = "success"
-    
-    manifest_object_key = (
-        f"bafin/_manifests/load_date={LOAD_DATE}/download_bafin_manifest.json"
-    )
-
-    minio.upload_bytes(
-        object_key=manifest_object_key,
-        content=json.dumps(manifest, indent=2).encode("utf-8"),
-        content_type="application/json",
-    )
-
-    for temp_file_path in temp_files:
-        try:
-            os.remove(temp_file_path)
-        except OSError:
-            pass
-
-    print("------------------------------------------------------------")
-    print(f"Manifest uploaded: s3://{MINIO_BUCKET}/{manifest_object_key}")
-    print(f"Job status: {manifest['status']}")
-    print(f"Successful files: {manifest['success_count']}")
-    print(f"Failed files: {manifest['failed_count']}")
-    print(f"Warnings: {manifest['warning_count']}")
-    print(f"Errors: {manifest['error_count']}")
-
-    if failed_files or error_count > 0:
-        raise RuntimeError(
-            f"BaFin download finished with {len(failed_files)} failed candidate(s) and {error_count} error(s)."
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=manifest["status"],
+            manifest_key=manifest_object_key,
+            effective_load_date=LOAD_DATE,
+            files_discovered=manifest.get("source_count_enabled"),
+            files_processed=len(manifest.get("files", [])),
+            files_success=manifest.get("success_count"),
+            files_failed=manifest.get("failed_count"),
+            downloaded_bytes=downloaded_bytes_total,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "bucket": MINIO_BUCKET,
+                "source": manifest.get("source"),
+                "load_date": LOAD_DATE,
+                "source_count_configured": manifest.get("source_count_configured"),
+                "source_count_enabled": manifest.get("source_count_enabled"),
+            },
         )
+
+    except Exception as exc:
+        if job_run_id and not failure_audited:
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_object_key,
+                effective_load_date=LOAD_DATE,
+                metadata_json={
+                    "bucket": MINIO_BUCKET,
+                    "source": manifest.get("source") if manifest else None,
+                    "load_date": LOAD_DATE,
+                    "manifest_status": manifest.get("status") if manifest else None,
+                },
+            )
+
+        raise
+
+    finally:
+        postgres.close()
 
 if __name__ == "__main__":
     main()

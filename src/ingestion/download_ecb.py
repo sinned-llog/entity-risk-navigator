@@ -16,7 +16,12 @@ from common.file_utils import (
     content_type_for_extension,
     sanitize_for_object_key,
 )
-
+from common.postgres_client import PostgresClient
+from common.audit_logger import (
+    start_job_run,
+    finish_job_run_success,
+    finish_job_run_failure,
+)
 
 ECB_API_BASE_URL = os.getenv("ECB_API_BASE_URL", "https://data-api.ecb.europa.eu/service").rstrip("/")
 ECB_START_PERIOD = os.getenv("ECB_START_PERIOD", "2020-01-01")
@@ -35,6 +40,8 @@ APP_ENV = os.getenv("APP_ENV", "dev")
 
 ECB_REQUEST_TIMEOUT_SECONDS = int(os.getenv("ECB_REQUEST_TIMEOUT_SECONDS", "300"))
 ECB_CHUNK_SIZE_BYTES = int(os.getenv("ECB_CHUNK_SIZE_BYTES", str(1024 * 1024)))
+ECB_MAX_RETRIES = int(os.getenv("ECB_MAX_RETRIES", "3"))
+ECB_RETRY_SLEEP_SECONDS = float(os.getenv("ECB_RETRY_SLEEP_SECONDS", "5"))
 
 LOAD_DT = datetime.now(timezone.utc)
 LOAD_DATE = LOAD_DT.strftime("%Y-%m-%d")
@@ -173,215 +180,315 @@ def build_ecb_url(dataset_code: str, series_key: str) -> str:
 def main() -> None:
     validate_environment()
 
-    enabled_series = [
-        series for series in ECB_SERIES
-        if series.get("enabled") and series.get("series_key")
-    ]
+    postgres = PostgresClient.from_env()
+    job_run_id = None
+    manifest_object_key = None
+    manifest = None
+    failure_audited = False
 
-    if not enabled_series:
-        raise RuntimeError("No ECB series enabled for download.")
+    try:
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="download_ecb",
+            job_type="download",
+            source="ECB Data Portal",
+            target_system="minio",
+            app_env=APP_ENV,
+            metadata_json={
+                "bucket": MINIO_BUCKET,
+                "request_timeout_seconds": ECB_REQUEST_TIMEOUT_SECONDS,
+                "chunk_size_bytes": ECB_CHUNK_SIZE_BYTES,
+                "max_retries": ECB_MAX_RETRIES,
+                "retry_sleep_seconds": ECB_RETRY_SLEEP_SECONDS,
+            },
+        )
 
-    minio = MinioClient(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ROOT_USER,
-        secret_key=MINIO_ROOT_PASSWORD,
-        bucket=MINIO_BUCKET,
-    )
+        enabled_series = [
+            series for series in ECB_SERIES
+            if series.get("enabled") and series.get("series_key")
+        ]
 
-    downloader = HttpDownloader(
-        timeout_seconds=ECB_REQUEST_TIMEOUT_SECONDS,
-        chunk_size_bytes=ECB_CHUNK_SIZE_BYTES,
-    )
+        if not enabled_series:
+            raise RuntimeError("No ECB series enabled for download.")
 
-    minio.ensure_bucket_exists()
+        minio = MinioClient(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ROOT_USER,
+            secret_key=MINIO_ROOT_PASSWORD,
+            bucket=MINIO_BUCKET,
+        )
 
-    manifest = {
-        "job_name": "download_ecb",
-        "app_env": APP_ENV,
-        "source": "ECB Data Portal",
-        "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
-        "load_date": LOAD_DATE,
-        "bucket": MINIO_BUCKET,
-        "ecb_api_base_url": ECB_API_BASE_URL,
-        "start_period": ECB_START_PERIOD,
-        "response_format": ECB_RESPONSE_FORMAT,
-        "series_count_configured": len(ECB_SERIES),
-        "series_count_enabled": len(enabled_series),
-        "files": [],
-        "status": "running",
-    }
+        downloader = HttpDownloader(
+            timeout_seconds=ECB_REQUEST_TIMEOUT_SECONDS,
+            chunk_size_bytes=ECB_CHUNK_SIZE_BYTES,
+        )
 
-    temp_files = []
+        minio.ensure_bucket_exists()
 
-    for series in enabled_series:
+        manifest = {
+            "job_name": "download_ecb",
+            "app_env": APP_ENV,
+            "source": "ECB Data Portal",
+            "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
+            "load_date": LOAD_DATE,
+            "bucket": MINIO_BUCKET,
+            "ecb_api_base_url": ECB_API_BASE_URL,
+            "start_period": ECB_START_PERIOD,
+            "response_format": ECB_RESPONSE_FORMAT,
+            "series_count_configured": len(ECB_SERIES),
+            "series_count_enabled": len(enabled_series),
+            "files": [],
+            "status": "running",
+        }
 
-        quality_checks = []
-        quality_summary = {}
+        temp_files = []
 
-        try:
-            dataset_code = series["dataset_code"]
-            series_key = series["series_key"]
-            indicator_name = series["indicator_name"]
-            source_url = build_ecb_url(dataset_code, series_key)
+        for series in enabled_series:
 
-            print("------------------------------------------------------------")
-            print(f"Dataset: {dataset_code}")
-            print(f"Series key: {series_key}")
-            print(f"Indicator: {indicator_name}")
+            quality_checks = []
+            quality_summary = {}
 
-            result = downloader.download_to_tempfile(source_url)
-            temp_files.append(result.temp_file_path)
+            try:
+                dataset_code = series["dataset_code"]
+                series_key = series["series_key"]
+                indicator_name = series["indicator_name"]
+                source_url = build_ecb_url(dataset_code, series_key)
 
-            safe_series_key = sanitize_for_object_key(series_key)
-            extension = result.extension
+                print("------------------------------------------------------------")
+                print(f"Dataset: {dataset_code}")
+                print(f"Series key: {series_key}")
+                print(f"Indicator: {indicator_name}")
 
-            quality_expectations = series.get("quality_expectations", {})
+                result = downloader.download_to_tempfile(source_url)
+                temp_files.append(result.temp_file_path)
 
-            quality_checks = run_download_quality_checks(
-                file_path=result.temp_file_path,
-                extension=extension,
-                expectations=quality_expectations,
-            )
+                safe_series_key = sanitize_for_object_key(series_key)
+                extension = result.extension
 
-            quality_summary = summarize_quality_checks(quality_checks)
+                quality_expectations = series.get("quality_expectations", {})
 
-            if quality_summary["error_count"] > 0:
-                raise RuntimeError(
-                    "Download quality checks failed: "
-                    + json.dumps(quality_checks, indent=2)
-            )
+                quality_checks = run_download_quality_checks(
+                    file_path=result.temp_file_path,
+                    extension=extension,
+                    expectations=quality_expectations,
+                )
 
-            base_path = f"ecb/{dataset_code}/load_date={LOAD_DATE}"
-            file_stem = f"{dataset_code}_{safe_series_key}"
+                quality_summary = summarize_quality_checks(quality_checks)
 
-            data_object_key = f"{base_path}/{file_stem}.{extension}"
-            metadata_object_key = f"{base_path}/{file_stem}.metadata.json"
+                if quality_summary["error_count"] > 0:
+                    raise RuntimeError(
+                        "Download quality checks failed: "
+                        + json.dumps(quality_checks, indent=2)
+                )
 
-            minio.upload_file(
-                object_key=data_object_key,
-                local_file_path=result.temp_file_path,
-                content_type=content_type_for_extension(extension),
-            )
+                base_path = f"ecb/{dataset_code}/load_date={LOAD_DATE}"
+                file_stem = f"{dataset_code}_{safe_series_key}"
 
-            metadata = {
-                "source": "ECB Data Portal",
-                "dataset_code": dataset_code,
-                "series_key": series_key,
-                "indicator_name": indicator_name,
-                "frequency": series.get("frequency"),
-                "unit": series.get("unit"),
-                "source_url": source_url,
-                "http_status": result.http_status,
-                "content_type": result.content_type,
-                "content_length_header": result.content_length_header,
-                "downloaded_bytes": result.downloaded_bytes,
-                "sha256": result.sha256,
-                "file_extension": extension,
-                "quality_summary": quality_summary,
-                "quality_checks": quality_checks,
-                "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
-                "load_date": LOAD_DATE,
-                "minio_bucket": MINIO_BUCKET,
-                "minio_object_key": data_object_key,
-            }
+                data_object_key = f"{base_path}/{file_stem}.{extension}"
+                metadata_object_key = f"{base_path}/{file_stem}.metadata.json"
 
-            minio.upload_bytes(
-                object_key=metadata_object_key,
-                content=json.dumps(metadata, indent=2).encode("utf-8"),
-                content_type="application/json",
-            )
+                minio.upload_file(
+                    object_key=data_object_key,
+                    local_file_path=result.temp_file_path,
+                    content_type=content_type_for_extension(extension),
+                )
 
-            manifest["files"].append(
-                {
+                metadata = {
+                    "source": "ECB Data Portal",
                     "dataset_code": dataset_code,
                     "series_key": series_key,
                     "indicator_name": indicator_name,
                     "frequency": series.get("frequency"),
                     "unit": series.get("unit"),
                     "source_url": source_url,
-                    "data_object_key": data_object_key,
-                    "metadata_object_key": metadata_object_key,
+                    "http_status": result.http_status,
+                    "content_type": result.content_type,
+                    "content_length_header": result.content_length_header,
                     "downloaded_bytes": result.downloaded_bytes,
                     "sha256": result.sha256,
+                    "file_extension": extension,
                     "quality_summary": quality_summary,
                     "quality_checks": quality_checks,
-                    "status": "success",
+                    "load_timestamp_utc": LOAD_TIMESTAMP_UTC,
+                    "load_date": LOAD_DATE,
+                    "minio_bucket": MINIO_BUCKET,
+                    "minio_object_key": data_object_key,
                 }
-            )
 
-            print(f"Uploaded data: s3://{MINIO_BUCKET}/{data_object_key}")
-            print(f"Uploaded metadata: s3://{MINIO_BUCKET}/{metadata_object_key}")
+                minio.upload_bytes(
+                    object_key=metadata_object_key,
+                    content=json.dumps(metadata, indent=2).encode("utf-8"),
+                    content_type="application/json",
+                )
 
-        except Exception as exc:
-            error_entry = {
-                "dataset_code": series.get("dataset_code"),
-                "series_key": series.get("series_key"),
-                "indicator_name": series.get("indicator_name"),
-                "status": "failed",
-                "quality_summary": quality_summary,
-                "quality_checks": quality_checks,
-                "error": str(exc),
-            }
+                manifest["files"].append(
+                    {
+                        "dataset_code": dataset_code,
+                        "series_key": series_key,
+                        "indicator_name": indicator_name,
+                        "frequency": series.get("frequency"),
+                        "unit": series.get("unit"),
+                        "source_url": source_url,
+                        "data_object_key": data_object_key,
+                        "metadata_object_key": metadata_object_key,
+                        "downloaded_bytes": result.downloaded_bytes,
+                        "sha256": result.sha256,
+                        "quality_summary": quality_summary,
+                        "quality_checks": quality_checks,
+                        "status": "success",
+                    }
+                )
 
-            manifest["files"].append(error_entry)
+                print(f"Uploaded data: s3://{MINIO_BUCKET}/{data_object_key}")
+                print(f"Uploaded metadata: s3://{MINIO_BUCKET}/{metadata_object_key}")
 
-            print("Download/upload failed:")
-            print(json.dumps(error_entry, indent=2))
+            except Exception as exc:
+                error_entry = {
+                    "dataset_code": series.get("dataset_code"),
+                    "series_key": series.get("series_key"),
+                    "indicator_name": series.get("indicator_name"),
+                    "status": "failed",
+                    "quality_summary": quality_summary,
+                    "quality_checks": quality_checks,
+                    "error": str(exc),
+                }
 
-    failed_files = [
-        file for file in manifest["files"]
-        if file.get("status") == "failed"
-    ]
+                manifest["files"].append(error_entry)
 
-    warning_count = 0
-    error_count = 0
+                print("Download/upload failed:")
+                print(json.dumps(error_entry, indent=2))
 
-    for file in manifest["files"]:
-        file_quality_summary = file.get("quality_summary") or {}
-        warning_count += int(file_quality_summary.get("warning_count", 0))
-        error_count += int(file_quality_summary.get("error_count", 0))
+        failed_files = [
+            file for file in manifest["files"]
+            if file.get("status") == "failed"
+        ]
 
-    manifest["failed_count"] = len(failed_files)
-    manifest["success_count"] = len(manifest["files"]) - len(failed_files)
-    manifest["warning_count"] = warning_count
-    manifest["error_count"] = error_count
+        warning_count = 0
+        error_count = 0
 
-    if failed_files or error_count > 0:
-        manifest["status"] = "failed"
-    elif warning_count > 0:
-        manifest["status"] = "success_with_warnings"
-    else:
-        manifest["status"] = "success"
+        for file in manifest["files"]:
+            file_quality_summary = file.get("quality_summary") or {}
+            warning_count += int(file_quality_summary.get("warning_count", 0))
+            error_count += int(file_quality_summary.get("error_count", 0))
 
-    manifest_object_key = (
-        f"ecb/_manifests/load_date={LOAD_DATE}/download_ecb_manifest.json"
-    )
+        manifest["failed_count"] = len(failed_files)
+        manifest["success_count"] = len(manifest["files"]) - len(failed_files)
+        manifest["warning_count"] = warning_count
+        manifest["error_count"] = error_count
 
-    minio.upload_bytes(
-        object_key=manifest_object_key,
-        content=json.dumps(manifest, indent=2).encode("utf-8"),
-        content_type="application/json",
-    )
+        if manifest["success_count"] > 0 and (failed_files or error_count > 0):
+            manifest["status"] = "success_with_warnings"
+        elif failed_files or error_count > 0:
+            manifest["status"] = "failed"
+        elif warning_count > 0:
+            manifest["status"] = "success_with_warnings"
+        else:
+            manifest["status"] = "success"
 
-    for temp_file_path in temp_files:
-        try:
-            os.remove(temp_file_path)
-        except OSError:
-            pass
-
-    print("------------------------------------------------------------")
-    print(f"Manifest uploaded: s3://{MINIO_BUCKET}/{manifest_object_key}")
-    print(f"Job status: {manifest['status']}")
-    print(f"Successful files: {manifest['success_count']}")
-    print(f"Failed files: {manifest['failed_count']}")
-    print(f"Warnings: {manifest['warning_count']}")
-    print(f"Errors: {manifest['error_count']}")
-
-    if failed_files or error_count > 0:
-        raise RuntimeError(
-            f"ECB download finished with {len(failed_files)} failed series and {error_count} quality check errors."
+        manifest_object_key = (
+            f"ecb/_manifests/load_date={LOAD_DATE}/download_ecb_manifest.json"
         )
 
+        minio.upload_bytes(
+            object_key=manifest_object_key,
+            content=json.dumps(manifest, indent=2).encode("utf-8"),
+            content_type="application/json",
+        )
+
+        for temp_file_path in temp_files:
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+
+        print("------------------------------------------------------------")
+        print(f"Manifest uploaded: s3://{MINIO_BUCKET}/{manifest_object_key}")
+        print(f"Job status: {manifest['status']}")
+        print(f"Successful files: {manifest['success_count']}")
+        print(f"Failed files: {manifest['failed_count']}")
+        print(f"Warnings: {manifest['warning_count']}")
+        print(f"Errors: {manifest['error_count']}")
+
+        downloaded_bytes_total = sum(
+            int(file.get("downloaded_bytes") or 0)
+            for file in manifest.get("files", [])
+            if file.get("status") == "success"
+        )
+        
+        if manifest["status"] == "failed":
+            error_message = (
+                f"{manifest['job_name']} failed with "
+                f"{len(failed_files)} failed source(s) "
+                f"and {error_count} quality error(s)."
+            )
+
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=error_message,
+                manifest_key=manifest_object_key,
+                effective_load_date=LOAD_DATE,
+                files_discovered=manifest.get("source_count_enabled"),
+                files_processed=len(manifest.get("files", [])),
+                files_success=manifest.get("success_count"),
+                files_failed=manifest.get("failed_count"),
+                downloaded_bytes=downloaded_bytes_total,
+                warning_count=manifest.get("warning_count"),
+                error_count=manifest.get("error_count"),
+                metadata_json={
+                    "bucket": MINIO_BUCKET,
+                    "source": manifest.get("source"),
+                    "load_date": LOAD_DATE,
+                    "manifest_status": manifest.get("status"),
+                },
+            )
+
+            failure_audited = True
+
+            raise RuntimeError(error_message)
+
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=manifest["status"],
+            manifest_key=manifest_object_key,
+            effective_load_date=LOAD_DATE,
+            files_discovered=manifest.get("source_count_enabled"),
+            files_processed=len(manifest.get("files", [])),
+            files_success=manifest.get("success_count"),
+            files_failed=manifest.get("failed_count"),
+            downloaded_bytes=downloaded_bytes_total,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "bucket": MINIO_BUCKET,
+                "source": manifest.get("source"),
+                "load_date": LOAD_DATE,
+                "source_count_configured": manifest.get("source_count_configured"),
+                "source_count_enabled": manifest.get("source_count_enabled"),
+            },
+        )
+
+    except Exception as exc:
+        if job_run_id and not failure_audited:
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_object_key,
+                effective_load_date=LOAD_DATE,
+                metadata_json={
+                    "bucket": MINIO_BUCKET,
+                    "source": manifest.get("source") if manifest else None,
+                    "load_date": LOAD_DATE,
+                    "manifest_status": manifest.get("status") if manifest else None,
+                },
+            )
+
+        raise
+
+    finally:
+        postgres.close()
 
 if __name__ == "__main__":
     main()

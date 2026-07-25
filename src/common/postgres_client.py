@@ -168,3 +168,16 @@ class PostgresClient:
         self.conn.commit()
 
         return len(rows)
+
+    def fetch_scalar(self, sql: str, params: tuple | None = None):
+        self.connect()
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+        self.conn.commit()
+
+        if row is None:
+            return None
+
+        return row[0]

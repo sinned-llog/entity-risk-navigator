@@ -16,7 +16,11 @@ from common.manifest_utils import (
     evaluate_snapshot_freshness,
     handle_stale_snapshot,
 )
-
+from common.audit_logger import (
+    start_job_run,
+    finish_job_run_success,
+    finish_job_run_failure,
+)
 
 # -------------------------------------------------------------------
 # Environment configuration
@@ -49,7 +53,7 @@ BAFIN_STALE_SNAPSHOT_POLICY = os.getenv(
 ).lower()
 
 BAFIN_LOAD_BATCH_SIZE = int(
-    os.getenv("BAFIN_LOAD_BATCH_SIZE", "1000")
+    os.getenv("BAFIN_LOAD_BATCH_SIZE", "100")
 )
 
 # 0 = unlimited
@@ -151,23 +155,26 @@ def ensure_raw_bafin_table(postgres: PostgresClient) -> None:
 def drop_raw_bafin_indexes(postgres: PostgresClient) -> None:
     postgres.execute(
         """
-        DROP INDEX IF EXISTS raw.idx_bafin_pages_bafin_id;
-        DROP INDEX IF EXISTS raw.idx_bafin_pages_company_name;
+        DROP INDEX IF EXISTS raw.idx_bafin_pages_bafin_institut_id;
+        DROP INDEX IF EXISTS raw.idx_bafin_pages_legal_name;
+        DROP INDEX IF EXISTS raw.idx_bafin_pages_search_name;
         DROP INDEX IF EXISTS raw.idx_bafin_pages_content_hash;
         DROP INDEX IF EXISTS raw.idx_bafin_pages_load_date;
         DROP INDEX IF EXISTS raw.idx_bafin_pages_source_object;
         """
     )
 
-
 def create_raw_bafin_indexes(postgres: PostgresClient) -> None:
     postgres.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_bafin_pages_bafin_id
-            ON raw.bafin_pages (bafin_id);
+        CREATE INDEX IF NOT EXISTS idx_bafin_pages_bafin_institut_id
+            ON raw.bafin_pages (bafin_institut_id);
 
-        CREATE INDEX IF NOT EXISTS idx_bafin_pages_company_name
-            ON raw.bafin_pages (company_name);
+        CREATE INDEX IF NOT EXISTS idx_bafin_pages_legal_name
+            ON raw.bafin_pages (legal_name);
+
+        CREATE INDEX IF NOT EXISTS idx_bafin_pages_search_name
+            ON raw.bafin_pages (search_name);
 
         CREATE INDEX IF NOT EXISTS idx_bafin_pages_content_hash
             ON raw.bafin_pages (content_hash);
@@ -268,29 +275,6 @@ def read_text_and_hash_from_stream(
 
     return raw_content, content_hash
 
-
-def load_metadata_json(
-    minio: MinioClient,
-    metadata_object_key: str | None,
-) -> str | None:
-    if not metadata_object_key:
-        return None
-
-    try:
-        metadata = minio.get_json_object(metadata_object_key)
-    except Exception as exc:
-        print(
-            f"WARNING: Could not load metadata object "
-            f"{metadata_object_key}: {exc}"
-        )
-        return None
-
-    return json.dumps(
-        metadata,
-        ensure_ascii=False,
-    )
-
-
 # -------------------------------------------------------------------
 # Database helpers
 # -------------------------------------------------------------------
@@ -359,6 +343,8 @@ def map_bafin_file_entry(
 
     if not data_object_key:
         raise RuntimeError("BaFin manifest entry is missing data_object_key.")
+
+    metadata = {}
 
     if metadata_object_key:
         try:
@@ -440,7 +426,9 @@ def process_bafin_files(
             continue
 
         print("------------------------------------------------------------")
-        print(f"Source name: {file_entry.get('source_name')}")
+        print(f"Candidate ID: {file_entry.get('candidate_id')}")
+        print(f"Search name: {file_entry.get('search_name')}")
+        print(f"Legal name: {file_entry.get('legal_name')}")
         print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
         print("Writing to table: raw.bafin_pages")
 
@@ -483,7 +471,6 @@ def process_bafin_files(
 # -------------------------------------------------------------------
 # Main job
 # -------------------------------------------------------------------
-
 def main() -> None:
     validate_environment()
 
@@ -502,8 +489,35 @@ def main() -> None:
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
+    job_run_id = None
+    manifest_key = None
+    effective_load_date = None
+    manifest = None
+    freshness = None
+    success_files = []
+    total_inserted = 0
+
     try:
         ensure_raw_bafin_table(postgres)
+
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="load_bafin_raw",
+            job_type="raw_load",
+            source="BaFin Unternehmensdatenbank",
+            target_system="postgres",
+            target_table="raw.bafin_pages",
+            app_env=APP_ENV,
+            metadata_json={
+                "requested_load_date": BAFIN_LOAD_DATE,
+                "max_snapshot_age_days": BAFIN_MAX_SNAPSHOT_AGE_DAYS,
+                "stale_snapshot_policy": BAFIN_STALE_SNAPSHOT_POLICY,
+                "batch_size": BAFIN_LOAD_BATCH_SIZE,
+                "max_files": BAFIN_MAX_FILES,
+                "rebuild_indexes": BAFIN_REBUILD_INDEXES,
+                "store_raw_content": BAFIN_STORE_RAW_CONTENT,
+            },
+        )
 
         if BAFIN_REBUILD_INDEXES:
             print("Dropping BaFin indexes before load.")
@@ -541,15 +555,74 @@ def main() -> None:
             print("Creating BaFin indexes after load.")
             create_raw_bafin_indexes(postgres)
 
+        audit_status = "success"
+
+        if manifest.get("status") == "success_with_warnings":
+            audit_status = "success_with_warnings"
+        elif int(manifest.get("warning_count") or 0) > 0:
+            audit_status = "success_with_warnings"
+
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=audit_status,
+            manifest_key=manifest_key,
+            effective_load_date=effective_load_date,
+            freshness=freshness,
+            files_discovered=len(manifest.get("files", [])),
+            files_processed=len(success_files),
+            files_success=len(success_files),
+            files_failed=manifest.get("failed_count"),
+            rows_inserted=total_inserted,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "manifest_status": manifest.get("status"),
+                "manifest_success_count": manifest.get("success_count"),
+                "manifest_failed_count": manifest.get("failed_count"),
+                "manifest_warning_count": manifest.get("warning_count"),
+                "manifest_error_count": manifest.get("error_count"),
+                "store_raw_content": BAFIN_STORE_RAW_CONTENT,
+                "batch_size": BAFIN_LOAD_BATCH_SIZE,
+                "max_files": BAFIN_MAX_FILES,
+                "rebuild_indexes": BAFIN_REBUILD_INDEXES,
+            },
+        )
+
         print("------------------------------------------------------------")
         print("BaFin raw load finished successfully.")
         print(f"Effective BaFin load date: {effective_load_date}")
         print(f"Freshness status: {freshness['freshness_status']}")
         print(f"Total inserted rows: {total_inserted}")
 
+    except Exception as exc:
+        if job_run_id:
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_key,
+                effective_load_date=effective_load_date,
+                freshness=freshness,
+                files_discovered=len(manifest.get("files", [])) if manifest else None,
+                files_processed=len(success_files) if success_files else None,
+                files_success=len(success_files) if success_files else None,
+                rows_inserted=total_inserted,
+                warning_count=manifest.get("warning_count") if manifest else None,
+                error_count=manifest.get("error_count") if manifest else None,
+                metadata_json={
+                    "manifest_status": manifest.get("status") if manifest else None,
+                    "store_raw_content": BAFIN_STORE_RAW_CONTENT,
+                    "batch_size": BAFIN_LOAD_BATCH_SIZE,
+                    "max_files": BAFIN_MAX_FILES,
+                    "rebuild_indexes": BAFIN_REBUILD_INDEXES,
+                },
+            )
+
+        raise
+
     finally:
         postgres.close()
-
 
 if __name__ == "__main__":
     main()

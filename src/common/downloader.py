@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import requests
 import time
 
-from ingestion.common.file_utils import (
+from common.file_utils import (
     guess_file_extension_from_url,
     detect_file_extension_from_content,
 )
