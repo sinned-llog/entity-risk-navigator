@@ -1,12 +1,8 @@
 import os
-import csv
 import json
-import zipfile
 import tempfile
 import hashlib
-from io import TextIOWrapper
 from datetime import datetime, timezone
-from typing import Iterator
 
 try:
     from dotenv import load_dotenv
@@ -21,8 +17,16 @@ from common.manifest_utils import (
     evaluate_snapshot_freshness,
     handle_stale_snapshot,
 )
-
-
+from common.row_utils import (
+    clean_csv_row,
+    get_by_possible_keys,
+    calculate_row_hash,
+    row_to_json_string,
+)
+from common.stream_utils import (
+    iter_csv_rows_from_zip_stream,
+    iter_csv_rows_from_text_stream,
+)
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
@@ -221,115 +225,6 @@ def resolve_gleif_manifest(
     )
 
     return manifest_key, effective_load_date, manifest, freshness
-
-
-# -------------------------------------------------------------------
-# Generic row helpers
-# -------------------------------------------------------------------
-
-def normalize_key(value: str | None) -> str:
-    if value is None:
-        return ""
-
-    return "".join(
-        char.lower()
-        for char in str(value)
-        if char.isalnum()
-    )
-
-
-def get_by_possible_keys(
-    row: dict,
-    possible_keys: list[str],
-) -> str | None:
-    normalized_lookup = {}
-
-    for key, value in row.items():
-        if key is None:
-            continue
-
-        normalized_key = normalize_key(key)
-
-        if normalized_key:
-            normalized_lookup[normalized_key] = value
-
-    for key in possible_keys:
-        value = normalized_lookup.get(normalize_key(key))
-
-        if value is not None and str(value).strip() != "":
-            return value
-
-    return None
-
-
-def clean_csv_row(row: dict) -> dict:
-    clean_row = {}
-
-    for key, value in row.items():
-        if key is None:
-            clean_row["_extra_fields"] = value
-            continue
-
-        clean_row[str(key)] = value
-
-    return clean_row
-
-
-def calculate_row_hash(row: dict) -> str:
-    clean_row = clean_csv_row(row)
-
-    normalized = json.dumps(
-        clean_row,
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-# -------------------------------------------------------------------
-# CSV readers (Stream-basiert für minimale Speichernutzung)
-# -------------------------------------------------------------------
-
-def iter_csv_rows_from_zip_stream(stream) -> Iterator[dict]:
-    """Liest die CSV innerhalb eines ZIP-Archivs zeilenweise."""
-    with zipfile.ZipFile(stream, "r") as zip_file:
-        csv_members = [
-            name
-            for name in zip_file.namelist()
-            if name.lower().endswith(".csv")
-        ]
-
-        if not csv_members:
-            raise RuntimeError("GLEIF ZIP archive does not contain a CSV file.")
-
-        csv_member = csv_members[0]
-        print(f"CSV member in ZIP: {csv_member}")
-
-        with zip_file.open(csv_member, "r") as raw_file:
-            text_file = TextIOWrapper(
-                raw_file,
-                encoding="utf-8-sig",
-                errors="replace",
-                newline="",
-            )
-            reader = csv.DictReader(text_file)
-            for row in reader:
-                yield row
-
-
-def iter_csv_rows_from_text_stream(stream) -> Iterator[dict]:
-    """Liest einen Text-Stream zeilenweise als CSV."""
-    text_file = TextIOWrapper(
-        stream,
-        encoding="utf-8-sig",
-        errors="replace",
-        newline="",
-    )
-    reader = csv.DictReader(text_file)
-    for row in reader:
-        yield row
-
 
 # -------------------------------------------------------------------
 # Database helpers
@@ -536,7 +431,7 @@ def map_lei_row(
         headquarters_address_country,
         next_renewal_date_raw,
         last_update_date_raw,
-        json.dumps(clean_row, ensure_ascii=False) if GLEIF_STORE_RAW_ROW_JSON else None,
+        row_to_json_string(clean_row) if GLEIF_STORE_RAW_ROW_JSON else None,
         file_entry.get("source_url"),
         data_object_key,
         file_entry.get("metadata_object_key"),
@@ -719,7 +614,7 @@ def map_rr_row(
         validation_sources,
         validation_documents,
         validation_reference,
-        json.dumps(clean_row, ensure_ascii=False) if GLEIF_STORE_RAW_ROW_JSON else None,
+        row_to_json_string(clean_row) if GLEIF_STORE_RAW_ROW_JSON else None,
         file_entry.get("source_url"),
         data_object_key,
         file_entry.get("metadata_object_key"),
@@ -932,6 +827,8 @@ def main() -> None:
 
     print("------------------------------------------------------------")
     print("Loading GLEIF raw data")
+    print("Target tables: raw.gleif_lei, raw.gleif_rr")
+    print("Insert mode: PostgreSQL COPY")
     print(f"Requested GLEIF_LOAD_DATE: {GLEIF_LOAD_DATE or 'not set'}")
     print(f"Stale snapshot policy: {GLEIF_STALE_SNAPSHOT_POLICY}")
     print(f"Max snapshot age days: {GLEIF_MAX_SNAPSHOT_AGE_DAYS}")
@@ -987,6 +884,10 @@ def main() -> None:
             print(f"Source name: {source_name}")
             print(f"Dataset group: {dataset_group}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
+            if dataset_group == "lei":
+                print("Writing to table: raw.gleif_lei")
+            elif dataset_group == "rr":
+                print("Writing to table: raw.gleif_rr")
 
             if data_object_key.lower().endswith(".zip"):
                 with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1017,9 +918,8 @@ def main() -> None:
                         total_rr_inserted += rr_count
 
             else:
-                stream = minio.get_object_stream(data_object_key)
+                with minio.get_object_stream(data_object_key) as stream:
 
-                try:
                     row_iterator = iter_csv_rows_from_text_stream(stream)
 
                     lei_count, rr_count = process_gleif_file_rows(
@@ -1032,9 +932,6 @@ def main() -> None:
 
                     total_lei_inserted += lei_count
                     total_rr_inserted += rr_count
-
-                finally:
-                    stream.close()
 
         if GLEIF_REBUILD_INDEXES:
             print("Creating GLEIF indexes after load.")

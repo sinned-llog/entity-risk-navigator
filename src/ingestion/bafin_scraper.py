@@ -383,7 +383,9 @@ def main() -> None:
     manifest["warning_count"] = warning_count
     manifest["error_count"] = error_count
 
-    if failed_files or error_count > 0:
+    if manifest["success_count"] > 0 and (failed_files or error_count > 0):
+        manifest["status"] = "success_with_warnings"
+    elif failed_files or error_count > 0:
         manifest["status"] = "failed"
     elif warning_count > 0:
         manifest["status"] = "success_with_warnings"

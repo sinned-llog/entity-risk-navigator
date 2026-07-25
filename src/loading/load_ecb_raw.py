@@ -1,8 +1,8 @@
 import os
 import csv
-from io import StringIO
+from io import TextIOWrapper
+from typing import Iterator
 from datetime import datetime, date, timezone
-from decimal import Decimal, InvalidOperation
 
 try:
     from dotenv import load_dotenv
@@ -19,8 +19,8 @@ from common.manifest_utils import (
     evaluate_snapshot_freshness,
     handle_stale_snapshot,
 )
-
-
+from common.stream_utils import iter_csv_rows_from_text_stream
+from common.row_utils import parse_decimal, row_to_json_string
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
@@ -50,7 +50,9 @@ ECB_STALE_SNAPSHOT_POLICY = os.getenv(
     "ECB_STALE_SNAPSHOT_POLICY",
     "warn",
 ).lower()
-
+ECB_LOAD_BATCH_SIZE = int(
+    os.getenv("ECB_LOAD_BATCH_SIZE", "5000")
+)
 
 # -------------------------------------------------------------------
 # Validation
@@ -210,27 +212,6 @@ def parse_obs_date(
 
     return None
 
-
-def parse_decimal(value: str | None) -> Decimal | None:
-    if value is None:
-        return None
-
-    text = value.strip()
-
-    if not text:
-        return None
-
-    try:
-        return Decimal(text)
-    except InvalidOperation:
-        return None
-
-
-def read_ecb_csv_rows(csv_text: str) -> list[dict[str, str]]:
-    reader = csv.DictReader(StringIO(csv_text))
-    return list(reader)
-
-
 # -------------------------------------------------------------------
 # Database helpers
 # -------------------------------------------------------------------
@@ -252,41 +233,32 @@ def insert_ecb_rows(
     postgres: PostgresClient,
     rows: list[tuple],
 ) -> int:
-    if not rows:
-        return 0
-
-    insert_sql = """
-        INSERT INTO raw.ecb_observations (
-            app_env,
-            source,
-            dataset_code,
-            series_key,
-            indicator_name,
-            frequency,
-            unit,
-            dataflow,
-            freq,
-            ref_area,
-            time_period_raw,
-            obs_date,
-            obs_value_raw,
-            obs_value,
-            obs_status,
-            raw_row,
-            source_url,
-            source_object_key,
-            metadata_object_key,
-            source_load_date
-        )
-        VALUES %s
-    """
-
-    return postgres.execute_values(
-        insert_sql,
-        rows,
-        page_size=1000,
+    return postgres.copy_rows(
+        table_name="raw.ecb_observations",
+        columns=[
+            "app_env",
+            "source",
+            "dataset_code",
+            "series_key",
+            "indicator_name",
+            "frequency",
+            "unit",
+            "dataflow",
+            "freq",
+            "ref_area",
+            "time_period_raw",
+            "obs_date",
+            "obs_value_raw",
+            "obs_value",
+            "obs_status",
+            "raw_row",
+            "source_url",
+            "source_object_key",
+            "metadata_object_key",
+            "source_load_date",
+        ],
+        rows=rows,
     )
-
 
 # -------------------------------------------------------------------
 # Main job
@@ -297,6 +269,9 @@ def main() -> None:
 
     print("------------------------------------------------------------")
     print("Loading ECB raw observations")
+    print("Target table: raw.ecb_observations")
+    print("Insert mode: PostgreSQL COPY")
+    print(f"Batch size: {ECB_LOAD_BATCH_SIZE}")
     print(f"Requested ECB_LOAD_DATE: {ECB_LOAD_DATE or 'not set'}")
     print(f"Stale snapshot policy: {ECB_STALE_SNAPSHOT_POLICY}")
     print(f"Max snapshot age days: {ECB_MAX_SNAPSHOT_AGE_DAYS}")
@@ -349,62 +324,79 @@ def main() -> None:
             print(f"Series key: {series_key}")
             print(f"Indicator: {indicator_name}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
-
-            csv_text = minio.get_text_object(data_object_key)
-            csv_rows = read_ecb_csv_rows(csv_text)
-
-            if not csv_rows:
-                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
-                continue
-
-            prepared_rows = []
-
-            for row in csv_rows:
-                time_period_raw = row.get("TIME_PERIOD")
-                obs_value_raw = row.get("OBS_VALUE")
-                obs_status = row.get("OBS_STATUS")
-
-                obs_date = parse_obs_date(time_period_raw, frequency)
-                obs_value = parse_decimal(obs_value_raw)
-
-                prepared_rows.append(
-                    (
-                        APP_ENV,
-                        "ECB Data Portal",
-                        dataset_code,
-                        series_key,
-                        indicator_name,
-                        frequency,
-                        unit,
-                        row.get("DATAFLOW"),
-                        row.get("FREQ"),
-                        row.get("REF_AREA"),
-                        time_period_raw,
-                        obs_date,
-                        obs_value_raw,
-                        obs_value,
-                        obs_status,
-                        Json(row),
-                        source_url,
-                        data_object_key,
-                        metadata_object_key,
-                        effective_load_date,
-                    )
-                )
+            print("Writing to table: raw.ecb_observations")
 
             delete_existing_rows_for_object(
                 postgres=postgres,
                 source_object_key=data_object_key,
             )
 
-            inserted_count = insert_ecb_rows(
-                postgres=postgres,
-                rows=prepared_rows,
-            )
+            prepared_rows = []
+            file_row_count = 0
+            file_inserted_count = 0
 
-            total_inserted += inserted_count
+            with minio.get_object_stream(data_object_key) as stream:
+                row_iterator = iter_csv_rows_from_text_stream(stream)
 
-            print(f"Inserted rows: {inserted_count}")
+                for row in row_iterator:
+                    file_row_count += 1
+
+                    time_period_raw = row.get("TIME_PERIOD")
+                    obs_value_raw = row.get("OBS_VALUE")
+                    obs_status = row.get("OBS_STATUS")
+
+                    obs_date = parse_obs_date(time_period_raw, frequency)
+                    obs_value = parse_decimal(obs_value_raw)
+
+                    prepared_rows.append(
+                        (
+                            APP_ENV,
+                            "ECB Data Portal",
+                            dataset_code,
+                            series_key,
+                            indicator_name,
+                            frequency,
+                            unit,
+                            row.get("DATAFLOW") or row.get("KEY"),
+                            row.get("FREQ"),
+                            row.get("REF_AREA"),
+                            time_period_raw,
+                            obs_date,
+                            obs_value_raw,
+                            obs_value,
+                            obs_status,
+                            row_to_json_string(row),
+                            source_url,
+                            data_object_key,
+                            metadata_object_key,
+                            effective_load_date,
+                        )
+                    )
+
+                    if len(prepared_rows) >= ECB_LOAD_BATCH_SIZE:
+                        inserted_count = insert_ecb_rows(
+                            postgres=postgres,
+                            rows=prepared_rows,
+                        )
+
+                        file_inserted_count += inserted_count
+                        total_inserted += inserted_count
+                        prepared_rows = []
+
+            if prepared_rows:
+                inserted_count = insert_ecb_rows(
+                    postgres=postgres,
+                    rows=prepared_rows,
+                )
+
+                file_inserted_count += inserted_count
+                total_inserted += inserted_count
+
+            if file_row_count == 0:
+                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
+                continue
+
+            print(f"Inserted rows: {file_inserted_count}")
 
         print("------------------------------------------------------------")
         print("ECB raw load finished successfully.")

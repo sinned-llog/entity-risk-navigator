@@ -3,6 +3,7 @@ import json
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
+from contextlib import contextmanager
 
 
 class MinioClient:
@@ -70,32 +71,30 @@ class MinioClient:
             ContentType=content_type,
         )
 
+    @contextmanager
     def get_object_stream(self, object_key: str):
+
         """
-        Gibt einen StreamingBody zurück.
+        Returns a StreamingBody as context manager.
 
-        Geeignet für:
-        - große CSV-Dateien
-        - Textdateien
-        - zeilenweises Lesen
+        Suitable for:
+        - Large CSV files
+        - Text files
+        - Line-by-line reading
 
-        Wichtig:
-        Der Aufrufer muss den Stream schließen:
-
-            stream = minio.get_object_stream(key)
-            try:
-                ...
-            finally:
-                stream.close()
-
-        Nicht ideal für ZIP-Dateien mit zipfile.ZipFile, weil ZIP-Dateien
-        normalerweise einen seekable Stream brauchen.
+        The stream will be closed automatically as soon as with statement is left.
         """
+
         response = self.client.get_object(
             Bucket=self.bucket,
             Key=object_key,
         )
-        return response["Body"]
+        body = response["Body"]
+
+        try:
+            yield body
+        finally:
+            body.close()
 
     def download_object_to_file(
         self,
@@ -103,11 +102,9 @@ class MinioClient:
         local_file_path: str,
     ) -> None:
         """
-        Lädt ein Objekt direkt in eine lokale Datei.
-
-        Das ist der empfohlene Weg für große ZIP-Dateien, weil zipfile.ZipFile
-        einen seekable File-Handle erwartet und du so nicht das komplette ZIP
-        in den RAM laden musst.
+       Downloads an object directly to a local file.
+       
+       This is the recommended approach for large ZIP files because zipfile.ZipFile expects a seekable file handle, allowing you to avoid loading the entire ZIP archive into memory (RAM).
         """
         self.client.download_file(
             Bucket=self.bucket,
@@ -117,11 +114,10 @@ class MinioClient:
 
     def get_object_bytes(self, object_key: str) -> bytes:
         """
-        Lädt ein Objekt vollständig in den Speicher.
+        Loads an object completely into memory.
 
-        Nur für kleine Dateien verwenden, z. B. JSON-Manifeste.
-        Für große CSV/ZIP-Dateien besser get_object_stream() oder
-        download_object_to_file() nutzen.
+        This method should only be used for small files, such as JSON manifests. 
+        For large CSV or ZIP files, use get_object_stream() or download_object_to_file() instead.
         """
         response = self.client.get_object(
             Bucket=self.bucket,

@@ -1,9 +1,6 @@
 import os
-import csv
-import json
-import hashlib
-from io import StringIO
 from datetime import datetime, timezone
+from typing import Iterator
 
 try:
     from dotenv import load_dotenv
@@ -11,8 +8,7 @@ try:
 except ImportError:
     pass
 
-from psycopg2.extras import Json
-
+import common
 from common.minio_client import MinioClient
 from common.postgres_client import PostgresClient
 from common.manifest_utils import (
@@ -20,7 +16,13 @@ from common.manifest_utils import (
     evaluate_snapshot_freshness,
     handle_stale_snapshot,
 )
-
+from common.stream_utils import iter_csv_rows_from_text_stream
+from common.row_utils import (
+    clean_csv_row,
+    get_by_possible_keys,
+    calculate_row_hash,
+    row_to_json_string,
+)
 
 # -------------------------------------------------------------------
 # Environment configuration
@@ -51,7 +53,22 @@ EU_FSF_STALE_SNAPSHOT_POLICY = os.getenv(
     "EU_FSF_STALE_SNAPSHOT_POLICY",
     "warn",
 ).lower()
+EU_FSF_LOAD_BATCH_SIZE = int(
+    os.getenv("EU_FSF_LOAD_BATCH_SIZE", "50000")
+)
 
+# 0 = unlimited
+EU_FSF_MAX_ROWS_PER_FILE = int(
+    os.getenv("EU_FSF_MAX_ROWS_PER_FILE", "0")
+)
+
+EU_FSF_REBUILD_INDEXES = (
+    os.getenv("EU_FSF_REBUILD_INDEXES", "false").lower() == "true"
+)
+
+EU_FSF_STORE_RAW_ROW_JSON = (
+    os.getenv("EU_FSF_STORE_RAW_ROW_JSON", "true").lower() == "true"
+)
 
 # -------------------------------------------------------------------
 # Validation
@@ -141,6 +158,37 @@ def ensure_raw_eu_fsf_table(postgres: PostgresClient) -> None:
         """
     )
 
+def drop_raw_eu_fsf_indexes(postgres: PostgresClient) -> None:
+    postgres.execute(
+        """
+        DROP INDEX IF EXISTS raw.idx_eu_fsf_full_csv_row_hash;
+        DROP INDEX IF EXISTS raw.idx_eu_fsf_full_csv_eu_ref;
+        DROP INDEX IF EXISTS raw.idx_eu_fsf_full_csv_name;
+        DROP INDEX IF EXISTS raw.idx_eu_fsf_full_csv_load_date;
+        DROP INDEX IF EXISTS raw.idx_eu_fsf_full_csv_source_object;
+        """
+    )
+
+
+def create_raw_eu_fsf_indexes(postgres: PostgresClient) -> None:
+    postgres.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_eu_fsf_full_csv_row_hash
+            ON raw.eu_fsf_full_csv (row_hash);
+
+        CREATE INDEX IF NOT EXISTS idx_eu_fsf_full_csv_eu_ref
+            ON raw.eu_fsf_full_csv (eu_reference_number);
+
+        CREATE INDEX IF NOT EXISTS idx_eu_fsf_full_csv_name
+            ON raw.eu_fsf_full_csv (name_alias_whole_name);
+
+        CREATE INDEX IF NOT EXISTS idx_eu_fsf_full_csv_load_date
+            ON raw.eu_fsf_full_csv (source_load_date);
+
+        CREATE INDEX IF NOT EXISTS idx_eu_fsf_full_csv_source_object
+            ON raw.eu_fsf_full_csv (source_object_key);
+        """
+    )
 # -------------------------------------------------------------------
 # Manifest / freshness helpers
 # -------------------------------------------------------------------
@@ -185,77 +233,6 @@ def resolve_eu_fsf_manifest(
 
     return manifest_key, effective_load_date, manifest, freshness
 
-
-# -------------------------------------------------------------------
-# CSV / row helpers
-# -------------------------------------------------------------------
-
-def read_csv_rows(csv_text: str) -> list[dict[str, str]]:
-    reader = csv.DictReader(
-        StringIO(csv_text),
-        delimiter=";",
-        quotechar='"',
-    )
-
-    return list(reader)
-
-def normalize_key(value: str | None) -> str:
-    if value is None:
-        return ""
-
-    return "".join(
-        char.lower()
-        for char in str(value)
-        if char.isalnum()
-    )
-
-
-def get_by_possible_keys(
-    row: dict[str, str],
-    possible_keys: list[str],
-) -> str | None:
-    normalized_lookup = {}
-
-    for key, value in row.items():
-        if key is None:
-            continue
-        normalized_key = normalize_key(key)
-
-        if normalized_key:
-            normalized_lookup[normalized_key] = value
-
-    for key in possible_keys:
-        value = normalized_lookup.get(normalize_key(key))
-
-        if value is not None and str(value).strip() != "":
-            return value
-
-    return None
-
-def clean_csv_row(row: dict) -> dict:
-    clean_row = {}
-
-    for key, value in row.items():
-        if key is None:
-            clean_row["_extra_fields"] = value
-            continue
-
-        clean_row[str(key)] = value
-
-    return clean_row
-
-def calculate_row_hash(row: dict[str, str]) -> str:
-
-    clean_row = clean_csv_row(row)
-
-    normalized = json.dumps(
-        clean_row,
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
 # -------------------------------------------------------------------
 # Database helpers
 # -------------------------------------------------------------------
@@ -272,48 +249,38 @@ def delete_existing_rows_for_object(
         (source_object_key,),
     )
 
-
 def insert_eu_fsf_rows(
     postgres: PostgresClient,
     rows: list[tuple],
 ) -> int:
-    if not rows:
-        return 0
-
-    insert_sql = """
-        INSERT INTO raw.eu_fsf_full_csv (
-            app_env,
-            source,
-            source_name,
-            dataset_group,
-            snapshot_type,
-            row_number,
-            row_hash,
-            entity_logical_id,
-            eu_reference_number,
-            un_reference_number,
-            subject_type,
-            name_alias_whole_name,
-            programme,
-            regulation_type,
-            regulation_number_title,
-            designation_date_raw,
-            publication_date_raw,
-            raw_row,
-            source_url,
-            source_object_key,
-            metadata_object_key,
-            source_load_date
-        )
-        VALUES %s
-    """
-
-    return postgres.execute_values(
-        insert_sql,
-        rows,
-        page_size=1000,
+    return postgres.copy_rows(
+        table_name="raw.eu_fsf_full_csv",
+        columns=[
+            "app_env",
+            "source",
+            "source_name",
+            "dataset_group",
+            "snapshot_type",
+            "row_number",
+            "row_hash",
+            "entity_logical_id",
+            "eu_reference_number",
+            "un_reference_number",
+            "subject_type",
+            "name_alias_whole_name",
+            "programme",
+            "regulation_type",
+            "regulation_number_title",
+            "designation_date_raw",
+            "publication_date_raw",
+            "raw_row",
+            "source_url",
+            "source_object_key",
+            "metadata_object_key",
+            "source_load_date",
+        ],
+        rows=rows,
     )
-
 
 # -------------------------------------------------------------------
 # Main job
@@ -324,15 +291,25 @@ def main() -> None:
 
     print("------------------------------------------------------------")
     print("Loading EU FSF raw full CSV")
+    print("Target table: raw.eu_fsf_full_csv")
+    print("Insert mode: PostgreSQL COPY")
     print(f"Requested EU_FSF_LOAD_DATE: {EU_FSF_LOAD_DATE or 'not set'}")
     print(f"Stale snapshot policy: {EU_FSF_STALE_SNAPSHOT_POLICY}")
     print(f"Max snapshot age days: {EU_FSF_MAX_SNAPSHOT_AGE_DAYS}")
+    print(f"Batch size: {EU_FSF_LOAD_BATCH_SIZE}")
+    print(f"Max rows per file: {EU_FSF_MAX_ROWS_PER_FILE or 'unlimited'}")
+    print(f"Rebuild indexes: {EU_FSF_REBUILD_INDEXES}")
+    print(f"Store raw_row JSON: {EU_FSF_STORE_RAW_ROW_JSON}")
 
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
     try:
         ensure_raw_eu_fsf_table(postgres)
+
+        if EU_FSF_REBUILD_INDEXES:
+            print("Dropping EU FSF indexes before load.")
+            drop_raw_eu_fsf_indexes(postgres)
 
         manifest_key, effective_load_date, manifest, freshness = resolve_eu_fsf_manifest(
             minio=minio,
@@ -372,167 +349,206 @@ def main() -> None:
             print("------------------------------------------------------------")
             print(f"Source name: {source_name}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
-
-            csv_text = minio.get_text_object(data_object_key)
-            csv_rows = read_csv_rows(csv_text)
-
-            if not csv_rows:
-                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
-                continue
-
-            prepared_rows = []
-
-            for row_number, row in enumerate(csv_rows, start=1):
-                clean_row = clean_csv_row(row)
-
-                entity_logical_id = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_LogicalId",
-                        "entity_logical_id",
-                        "Entity Logical Id",
-                        "logical_id",
-                    ],
-                )
-
-                eu_reference_number = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_EU_ReferenceNumber",
-                        "eu_reference_number",
-                        "EU Reference Number",
-                        "EUReferenceNumber",
-                    ],
-                )
-
-                un_reference_number = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_UnitedNationId",
-                        "un_reference_number",
-                        "United Nation Id",
-                        "UN Reference Number",
-                    ],
-                )
-
-                subject_type = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_SubjectType_ClassificationCode",
-                        "Entity_SubjectType",
-                        "SubjectType_ClassificationCode",
-                        "subject_type",
-                        "Subject Type",
-                        "classification_code",
-                    ],
-                )
-
-                name_alias_whole_name = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "NameAlias_WholeName",
-                        "name_alias_whole_name",
-                        "WholeName",
-                        "whole_name",
-                        "name",
-                    ],
-                )
-
-                programme = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_Regulation_Programme",
-                        "NameAlias_Regulation_Programme",
-                        "Regulation_Programme",
-                        "programme",
-                        "Programme",
-                        "sanctions_programme",
-                    ],
-                )
-
-                regulation_type = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_Regulation_Type",
-                        "NameAlias_Regulation_Type",
-                        "Regulation_Type",
-                        "regulation_type",
-                        "Regulation Type",
-                    ],
-                )
-
-                regulation_number_title = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_Regulation_NumberTitle",
-                        "NameAlias_Regulation_NumberTitle",
-                        "Regulation_NumberTitle",
-                        "regulation_number_title",
-                        "Regulation Number Title",
-                        "legal_basis",
-                    ],
-                )
-
-                designation_date_raw = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_DesignationDate",
-                        "designation_date",
-                        "Designation Date",
-                    ],
-                )
-
-                publication_date_raw = get_by_possible_keys(
-                    clean_row,
-                    [
-                        "Entity_Regulation_PublicationDate",
-                        "NameAlias_Regulation_PublicationDate",
-                        "Regulation_PublicationDate",
-                        "publication_date",
-                        "Publication Date",
-                    ],
-                )
-
-                prepared_rows.append(
-                    (
-                        APP_ENV,
-                        "EU Financial Sanctions Files",
-                        source_name,
-                        dataset_group,
-                        snapshot_type,
-                        row_number,
-                        calculate_row_hash(clean_row),
-                        entity_logical_id,
-                        eu_reference_number,
-                        un_reference_number,
-                        subject_type,
-                        name_alias_whole_name,
-                        programme,
-                        regulation_type,
-                        regulation_number_title,
-                        designation_date_raw,
-                        publication_date_raw,
-                        Json(clean_row),
-                        source_url,
-                        data_object_key,
-                        metadata_object_key,
-                        effective_load_date,
-                    )
-                )
+            print("Writing to table: raw.eu_fsf_full_csv")            
 
             delete_existing_rows_for_object(
                 postgres=postgres,
                 source_object_key=data_object_key,
             )
 
-            inserted_count = insert_eu_fsf_rows(
-                postgres=postgres,
-                rows=prepared_rows,
-            )
+            prepared_rows = []
+            file_row_count = 0
+            file_inserted_count = 0
 
-            total_inserted += inserted_count
+            with minio.get_object_stream(data_object_key) as stream:
+                row_iterator = iter_csv_rows_from_text_stream(
+                    stream,
+                    delimiter=";",
+                )
 
-            print(f"Inserted rows: {inserted_count}")
+                for row_number, row in enumerate(row_iterator, start=1):
+                    if (
+                        EU_FSF_MAX_ROWS_PER_FILE > 0
+                        and row_number > EU_FSF_MAX_ROWS_PER_FILE
+                    ):
+                        print(
+                            f"Reached EU_FSF_MAX_ROWS_PER_FILE={EU_FSF_MAX_ROWS_PER_FILE}. "
+                            "Stopping EU FSF file processing."
+                        )
+
+                        if hasattr(row_iterator, "close"):
+                            row_iterator.close()
+
+                        break
+
+                    file_row_count += 1
+                    clean_row = clean_csv_row(row)
+
+                    entity_logical_id = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_LogicalId",
+                            "entity_logical_id",
+                            "Entity Logical Id",
+                            "logical_id",
+                        ],
+                    )
+
+                    eu_reference_number = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_EU_ReferenceNumber",
+                            "eu_reference_number",
+                            "EU Reference Number",
+                            "EUReferenceNumber",
+                        ],
+                    )
+
+                    un_reference_number = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_UnitedNationId",
+                            "un_reference_number",
+                            "United Nation Id",
+                            "UN Reference Number",
+                        ],
+                    )
+
+                    subject_type = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_SubjectType_ClassificationCode",
+                            "Entity_SubjectType",
+                            "SubjectType_ClassificationCode",
+                            "subject_type",
+                            "Subject Type",
+                            "classification_code",
+                        ],
+                    )
+
+                    name_alias_whole_name = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "NameAlias_WholeName",
+                            "name_alias_whole_name",
+                            "WholeName",
+                            "whole_name",
+                            "name",
+                        ],
+                    )
+
+                    programme = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_Regulation_Programme",
+                            "NameAlias_Regulation_Programme",
+                            "Regulation_Programme",
+                            "programme",
+                            "Programme",
+                            "sanctions_programme",
+                        ],
+                    )
+
+                    regulation_type = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_Regulation_Type",
+                            "NameAlias_Regulation_Type",
+                            "Regulation_Type",
+                            "regulation_type",
+                            "Regulation Type",
+                        ],
+                    )
+
+                    regulation_number_title = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_Regulation_NumberTitle",
+                            "NameAlias_Regulation_NumberTitle",
+                            "Regulation_NumberTitle",
+                            "regulation_number_title",
+                            "Regulation Number Title",
+                            "legal_basis",
+                        ],
+                    )
+
+                    designation_date_raw = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_DesignationDate",
+                            "designation_date",
+                            "Designation Date",
+                        ],
+                    )
+
+                    publication_date_raw = get_by_possible_keys(
+                        clean_row,
+                        [
+                            "Entity_Regulation_PublicationDate",
+                            "NameAlias_Regulation_PublicationDate",
+                            "Regulation_PublicationDate",
+                            "publication_date",
+                            "Publication Date",
+                        ],
+                    )
+
+                    prepared_rows.append(
+                        (
+                            APP_ENV,
+                            "EU Financial Sanctions Files",
+                            source_name,
+                            dataset_group,
+                            snapshot_type,
+                            row_number,
+                            calculate_row_hash(clean_row),
+                            entity_logical_id,
+                            eu_reference_number,
+                            un_reference_number,
+                            subject_type,
+                            name_alias_whole_name,
+                            programme,
+                            regulation_type,
+                            regulation_number_title,
+                            designation_date_raw,
+                            publication_date_raw,
+                            row_to_json_string(clean_row)
+                            if EU_FSF_STORE_RAW_ROW_JSON
+                            else None,
+                            source_url,
+                            data_object_key,
+                            metadata_object_key,
+                            effective_load_date,
+                        )
+                    )
+
+                    if len(prepared_rows) >= EU_FSF_LOAD_BATCH_SIZE:
+                        inserted_count = insert_eu_fsf_rows(
+                            postgres=postgres,
+                            rows=prepared_rows,
+                        )
+
+                        file_inserted_count += inserted_count
+                        total_inserted += inserted_count
+                        prepared_rows = []
+
+            if prepared_rows:
+                inserted_count = insert_eu_fsf_rows(
+                    postgres=postgres,
+                    rows=prepared_rows,
+                )
+
+                file_inserted_count += inserted_count
+                total_inserted += inserted_count
+
+            if file_row_count == 0:
+                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
+                continue
+
+            print(f"Inserted rows: {file_inserted_count}")
+
+        if EU_FSF_REBUILD_INDEXES:
+            print("Creating EU FSF indexes after load.")
+            create_raw_eu_fsf_indexes(postgres)
 
         print("------------------------------------------------------------")
         print("EU FSF raw load finished successfully.")
