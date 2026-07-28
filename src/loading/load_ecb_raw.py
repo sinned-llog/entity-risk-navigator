@@ -1,7 +1,4 @@
 import os
-import csv
-from io import TextIOWrapper
-from typing import Iterator
 from datetime import datetime, date, timezone
 
 try:
@@ -10,17 +7,12 @@ try:
 except ImportError:
     pass
 
-from psycopg2.extras import Json
-
 from common.minio_client import MinioClient
 from common.postgres_client import PostgresClient
-from common.manifest_utils import (
-    find_latest_successful_manifest,
-    evaluate_snapshot_freshness,
-    handle_stale_snapshot,
-)
+from common.manifest_utils import find_latest_successful_manifest, evaluate_snapshot_freshness, handle_stale_snapshot
 from common.stream_utils import iter_csv_rows_from_text_stream
 from common.row_utils import parse_decimal, row_to_json_string
+from common.audit_logger import start_job_run, finish_job_run_success, finish_job_run_failure
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
@@ -279,7 +271,33 @@ def main() -> None:
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
+    job_run_id = None
+    manifest_key = None
+    effective_load_date = None
+    manifest = None
+    freshness = None    
+    success_files = []
+    total_inserted = 0
+    total_rows_read = 0
+    processed_file_count = 0
+
     try:
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="load_ecb_raw",
+            job_type="raw_load",
+            source="ECB Data Portal",
+            target_system="postgres",
+            target_table="raw.ecb_observations",
+            app_env=APP_ENV,
+            metadata_json={
+                "requested_load_date": ECB_LOAD_DATE,
+                "max_snapshot_age_days": ECB_MAX_SNAPSHOT_AGE_DAYS,
+                "stale_snapshot_policy": ECB_STALE_SNAPSHOT_POLICY,
+                "batch_size": ECB_LOAD_BATCH_SIZE,
+            },
+        )
+
         ensure_raw_ecb_table(postgres)
 
         manifest_key, effective_load_date, manifest, freshness = resolve_ecb_manifest(
@@ -303,8 +321,6 @@ def main() -> None:
                 f"No successful ECB files found in manifest for load_date={effective_load_date}."
             )
 
-        total_inserted = 0
-
         for file_entry in success_files:
             dataset_code = file_entry.get("dataset_code")
             series_key = file_entry.get("series_key")
@@ -318,6 +334,8 @@ def main() -> None:
             if not data_object_key:
                 print("Skipping manifest entry without data_object_key.")
                 continue
+
+            processed_file_count += 1
 
             print("------------------------------------------------------------")
             print(f"Dataset: {dataset_code}")
@@ -340,6 +358,7 @@ def main() -> None:
 
                 for row in row_iterator:
                     file_row_count += 1
+                    total_rows_read += 1
 
                     time_period_raw = row.get("TIME_PERIOD")
                     obs_value_raw = row.get("OBS_VALUE")
@@ -383,26 +402,84 @@ def main() -> None:
                         total_inserted += inserted_count
                         prepared_rows = []
 
-            if prepared_rows:
-                inserted_count = insert_ecb_rows(
-                    postgres=postgres,
-                    rows=prepared_rows,
-                )
+                if prepared_rows:
+                    inserted_count = insert_ecb_rows(
+                        postgres=postgres,
+                        rows=prepared_rows,
+                    )
 
-                file_inserted_count += inserted_count
-                total_inserted += inserted_count
+                    file_inserted_count += inserted_count
+                    total_inserted += inserted_count
+                    prepared_rows = []
 
-            if file_row_count == 0:
-                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
-                continue
+                if file_row_count == 0:
+                    print(f"WARNING: CSV file contains no data rows: {data_object_key}")
+                    continue    
 
-            print(f"Inserted rows: {file_inserted_count}")
+                print(f"Read rows for file: {file_row_count}")
+                print(f"Inserted rows for file: {file_inserted_count}")
+
+        audit_status = "success"
+
+        if manifest.get("status") == "success_with_warnings":
+            audit_status = "success_with_warnings"
+        elif int(manifest.get("warning_count") or 0) > 0:
+            audit_status = "success_with_warnings"
+
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=audit_status,
+            manifest_key=manifest_key,
+            effective_load_date=effective_load_date,
+            freshness=freshness,
+            files_discovered=len(manifest.get("files", [])),
+            files_processed=processed_file_count,
+            files_success=processed_file_count,
+            files_failed=manifest.get("failed_count"),
+            rows_read=total_rows_read,
+            rows_inserted=total_inserted,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "manifest_status": manifest.get("status"),
+                "manifest_success_count": manifest.get("success_count"),
+                "manifest_failed_count": manifest.get("failed_count"),
+                "manifest_warning_count": manifest.get("warning_count"),
+                "manifest_error_count": manifest.get("error_count"),
+                "batch_size": ECB_LOAD_BATCH_SIZE,
+            },
+        )
 
         print("------------------------------------------------------------")
         print("ECB raw load finished successfully.")
         print(f"Effective ECB load date: {effective_load_date}")
         print(f"Freshness status: {freshness['freshness_status']}")
         print(f"Total inserted rows: {total_inserted}")
+
+    except Exception as exc:
+        if job_run_id:
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_key,
+                effective_load_date=effective_load_date,
+                freshness=freshness,
+                files_discovered=len(manifest.get("files", [])) if manifest else None,
+                files_processed=processed_file_count,
+                files_success=processed_file_count,
+                files_failed=manifest.get("failed_count") if manifest else None,
+                rows_read=total_rows_read,
+                rows_inserted=total_inserted,
+                warning_count=manifest.get("warning_count") if manifest else None,
+                error_count=manifest.get("error_count") if manifest else None,
+                metadata_json={
+                    "manifest_status": manifest.get("status") if manifest else None,
+                    "batch_size": ECB_LOAD_BATCH_SIZE,
+                },
+            )
+        raise
 
     finally:
         postgres.close()

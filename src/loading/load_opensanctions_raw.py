@@ -12,19 +12,10 @@ except ImportError:
 
 from common.minio_client import MinioClient
 from common.postgres_client import PostgresClient
-from common.manifest_utils import (
-    find_latest_successful_manifest,
-    evaluate_snapshot_freshness,
-    handle_stale_snapshot,
-)
-from common.row_utils import (
-    clean_csv_row,
-    get_by_possible_keys,
-    calculate_row_hash,
-    row_to_json_string,
-)
+from common.manifest_utils import find_latest_successful_manifest, evaluate_snapshot_freshness, handle_stale_snapshot
+from common.row_utils import clean_csv_row, get_by_possible_keys, calculate_row_hash, row_to_json_string
 from common.stream_utils import iter_csv_rows_from_text_stream
-
+from common.audit_logger import start_job_run, finish_job_run_success, finish_job_run_failure
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
@@ -418,7 +409,6 @@ def process_opensanctions_file(
 # -------------------------------------------------------------------
 # Main job
 # -------------------------------------------------------------------
-
 def main() -> None:
     validate_environment()
 
@@ -437,15 +427,45 @@ def main() -> None:
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
+    job_run_id = None
+    manifest_key = None
+    effective_load_date = None
+    manifest = None
+    freshness = None
+    success_files = []
+
+    total_inserted = 0
+    total_rows_read = 0
+    processed_file_count = 0
+
     try:
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="load_opensanctions_raw",
+            job_type="raw_load",
+            source="OpenSanctions",
+            target_system="postgres",
+            target_table="raw.opensanctions_targets_simple",
+            app_env=APP_ENV,
+            metadata_json={
+                "requested_load_date": OPENSANCTIONS_LOAD_DATE,
+                "max_snapshot_age_days": OPENSANCTIONS_MAX_SNAPSHOT_AGE_DAYS,
+                "stale_snapshot_policy": OPENSANCTIONS_STALE_SNAPSHOT_POLICY,
+                "batch_size": OPENSANCTIONS_LOAD_BATCH_SIZE,
+                "max_rows_per_file": OPENSANCTIONS_MAX_ROWS_PER_FILE,
+                "rebuild_indexes": OPENSANCTIONS_REBUILD_INDEXES,
+                "store_raw_row_json": OPENSANCTIONS_STORE_RAW_ROW_JSON,
+            },
+        )
+
         ensure_raw_opensanctions_table(postgres)
 
         if OPENSANCTIONS_REBUILD_INDEXES:
             print("Dropping OpenSanctions indexes before load.")
             drop_raw_opensanctions_indexes(postgres)
 
-        manifest_key, effective_load_date, manifest, freshness = (
-            resolve_opensanctions_manifest(minio=minio)
+        manifest_key, effective_load_date, manifest, freshness = resolve_opensanctions_manifest(
+            minio=minio,
         )
 
         print("------------------------------------------------------------")
@@ -462,53 +482,230 @@ def main() -> None:
 
         if not success_files:
             raise RuntimeError(
-                "No successful OpenSanctions files found in manifest "
-                f"for load_date={effective_load_date}."
+                f"No successful OpenSanctions files found in manifest for load_date={effective_load_date}."
             )
-
-        total_inserted = 0
 
         for file_entry in success_files:
             source_name = file_entry.get("source_name")
+            dataset_group = file_entry.get("dataset_group")
+            snapshot_type = file_entry.get("snapshot_type")
+            source_url = file_entry.get("source_url")
             data_object_key = file_entry.get("data_object_key")
+            metadata_object_key = file_entry.get("metadata_object_key")
 
             if not data_object_key:
                 print("Skipping manifest entry without data_object_key.")
                 continue
+
+            processed_file_count += 1
 
             print("------------------------------------------------------------")
             print(f"Source name: {source_name}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
             print("Writing to table: raw.opensanctions_targets_simple")
 
+            delete_existing_rows_for_object(
+                postgres=postgres,
+                source_object_key=data_object_key,
+            )
+
+            prepared_rows = []
+            file_row_count = 0
+            file_inserted_count = 0
+
             with minio.get_object_stream(data_object_key) as stream:
                 row_iterator = iter_csv_rows_from_text_stream(stream)
 
-                inserted_count = process_opensanctions_file(
+                for row_number, row in enumerate(row_iterator, start=1):
+                    if (
+                        OPENSANCTIONS_MAX_ROWS_PER_FILE > 0
+                        and row_number > OPENSANCTIONS_MAX_ROWS_PER_FILE
+                    ):
+                        print(
+                            f"Reached OPENSANCTIONS_MAX_ROWS_PER_FILE={OPENSANCTIONS_MAX_ROWS_PER_FILE}. "
+                            "Stopping OpenSanctions file processing."
+                        )
+
+                        if hasattr(row_iterator, "close"):
+                            row_iterator.close()
+
+                        break
+
+                    file_row_count += 1
+                    total_rows_read += 1
+
+                    clean_row = clean_csv_row(row)
+
+                    opensanctions_id = get_by_possible_keys(
+                        clean_row,
+                        ["id", "opensanctions_id"],
+                    )
+
+                    schema_name = get_by_possible_keys(
+                        clean_row,
+                        ["schema", "schema_name"],
+                    )
+
+                    caption = get_by_possible_keys(
+                        clean_row,
+                        ["caption", "name"],
+                    )
+
+                    datasets = get_by_possible_keys(
+                        clean_row,
+                        ["dataset", "datasets"],
+                    )
+
+                    countries = get_by_possible_keys(
+                        clean_row,
+                        ["countries", "country"],
+                    )
+
+                    first_seen_raw = get_by_possible_keys(
+                        clean_row,
+                        ["first_seen", "first_seen_raw"],
+                    )
+
+                    last_seen_raw = get_by_possible_keys(
+                        clean_row,
+                        ["last_seen", "last_seen_raw"],
+                    )
+
+                    last_change_raw = get_by_possible_keys(
+                        clean_row,
+                        ["last_change", "last_change_raw"],
+                    )
+
+                    prepared_rows.append(
+                        (
+                            APP_ENV,
+                            "OpenSanctions",
+                            source_name,
+                            dataset_group,
+                            snapshot_type,
+                            row_number,
+                            calculate_row_hash(clean_row),
+                            opensanctions_id,
+                            schema_name,
+                            caption,
+                            datasets,
+                            countries,
+                            first_seen_raw,
+                            last_seen_raw,
+                            last_change_raw,
+                            row_to_json_string(clean_row)
+                            if OPENSANCTIONS_STORE_RAW_ROW_JSON
+                            else None,
+                            source_url,
+                            data_object_key,
+                            metadata_object_key,
+                            effective_load_date,
+                        )
+                    )
+
+                    if len(prepared_rows) >= OPENSANCTIONS_LOAD_BATCH_SIZE:
+                        inserted_count = insert_opensanctions_rows(
+                            postgres=postgres,
+                            rows=prepared_rows,
+                        )
+
+                        file_inserted_count += inserted_count
+                        total_inserted += inserted_count
+                        prepared_rows = []
+
+            if prepared_rows:
+                inserted_count = insert_opensanctions_rows(
                     postgres=postgres,
-                    row_iterator=row_iterator,
-                    file_entry=file_entry,
-                    data_object_key=data_object_key,
-                    effective_load_date=effective_load_date,
+                    rows=prepared_rows,
                 )
 
+                file_inserted_count += inserted_count
                 total_inserted += inserted_count
+                prepared_rows = []
 
-                print(f"Inserted OpenSanctions rows for file: {inserted_count}")
+            if file_row_count == 0:
+                print(f"WARNING: CSV file contains no data rows: {data_object_key}")
+                continue
+
+            print(f"Read rows for file: {file_row_count}")
+            print(f"Inserted rows for file: {file_inserted_count}")
 
         if OPENSANCTIONS_REBUILD_INDEXES:
             print("Creating OpenSanctions indexes after load.")
             create_raw_opensanctions_indexes(postgres)
 
+        audit_status = "success"
+
+        if manifest.get("status") == "success_with_warnings":
+            audit_status = "success_with_warnings"
+        elif int(manifest.get("warning_count") or 0) > 0:
+            audit_status = "success_with_warnings"
+
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=audit_status,
+            manifest_key=manifest_key,
+            effective_load_date=effective_load_date,
+            freshness=freshness,
+            files_discovered=len(manifest.get("files", [])),
+            files_processed=processed_file_count,
+            files_success=processed_file_count,
+            files_failed=manifest.get("failed_count"),
+            rows_read=total_rows_read,
+            rows_inserted=total_inserted,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "manifest_status": manifest.get("status"),
+                "manifest_success_count": manifest.get("success_count"),
+                "manifest_failed_count": manifest.get("failed_count"),
+                "manifest_warning_count": manifest.get("warning_count"),
+                "manifest_error_count": manifest.get("error_count"),
+                "batch_size": OPENSANCTIONS_LOAD_BATCH_SIZE,
+                "max_rows_per_file": OPENSANCTIONS_MAX_ROWS_PER_FILE,
+                "rebuild_indexes": OPENSANCTIONS_REBUILD_INDEXES,
+                "store_raw_row_json": OPENSANCTIONS_STORE_RAW_ROW_JSON,
+            },
+        )
+
         print("------------------------------------------------------------")
         print("OpenSanctions raw load finished successfully.")
         print(f"Effective OpenSanctions load date: {effective_load_date}")
         print(f"Freshness status: {freshness['freshness_status']}")
+        print(f"Total read rows: {total_rows_read}")
         print(f"Total inserted rows: {total_inserted}")
+
+    except Exception as exc:
+        if job_run_id:
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_key,
+                effective_load_date=effective_load_date,
+                freshness=freshness,
+                files_discovered=len(manifest.get("files", [])) if manifest else None,
+                files_processed=processed_file_count,
+                files_success=processed_file_count,
+                files_failed=manifest.get("failed_count") if manifest else None,
+                rows_read=total_rows_read,
+                rows_inserted=total_inserted,
+                warning_count=manifest.get("warning_count") if manifest else None,
+                error_count=manifest.get("error_count") if manifest else None,
+                metadata_json={
+                    "manifest_status": manifest.get("status") if manifest else None,
+                    "batch_size": OPENSANCTIONS_LOAD_BATCH_SIZE,
+                    "max_rows_per_file": OPENSANCTIONS_MAX_ROWS_PER_FILE,
+                    "rebuild_indexes": OPENSANCTIONS_REBUILD_INDEXES,
+                    "store_raw_row_json": OPENSANCTIONS_STORE_RAW_ROW_JSON,
+                },
+            )
+
+        raise
 
     finally:
         postgres.close()
-
 
 if __name__ == "__main__":
     main()

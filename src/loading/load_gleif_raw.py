@@ -3,6 +3,7 @@ import json
 import tempfile
 import hashlib
 from datetime import datetime, timezone
+from typing import Iterator
 
 try:
     from dotenv import load_dotenv
@@ -12,21 +13,10 @@ except ImportError:
 
 from common.minio_client import MinioClient
 from common.postgres_client import PostgresClient
-from common.manifest_utils import (
-    find_latest_successful_manifest,
-    evaluate_snapshot_freshness,
-    handle_stale_snapshot,
-)
-from common.row_utils import (
-    clean_csv_row,
-    get_by_possible_keys,
-    calculate_row_hash,
-    row_to_json_string,
-)
-from common.stream_utils import (
-    iter_csv_rows_from_zip_stream,
-    iter_csv_rows_from_text_stream,
-)
+from common.manifest_utils import find_latest_successful_manifest, evaluate_snapshot_freshness, handle_stale_snapshot
+from common.row_utils import clean_csv_row, get_by_possible_keys, calculate_row_hash, row_to_json_string
+from common.stream_utils import iter_csv_rows_from_zip_stream, iter_csv_rows_from_text_stream 
+from common.audit_logger import start_job_run, finish_job_run_success, finish_job_run_failure
 # -------------------------------------------------------------------
 # Environment configuration
 # -------------------------------------------------------------------
@@ -55,7 +45,6 @@ GLEIF_STALE_SNAPSHOT_POLICY = os.getenv(
     "warn",
 ).lower()
 
-# Erhöht auf 50.000 für optimale COPY-Performance
 GLEIF_LOAD_BATCH_SIZE = int(os.getenv("GLEIF_LOAD_BATCH_SIZE", "50000"))
 GLEIF_MAX_ROWS_PER_FILE = int(
     os.getenv("GLEIF_MAX_ROWS_PER_FILE", "0")
@@ -821,7 +810,6 @@ def process_gleif_file_rows(
 # -------------------------------------------------------------------
 # Main job
 # -------------------------------------------------------------------
-
 def main() -> None:
     validate_environment()
 
@@ -840,7 +828,37 @@ def main() -> None:
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
+    job_run_id = None
+    manifest_key = None
+    effective_load_date = None
+    manifest = None
+    freshness = None
+    success_files = []
+
+    total_lei_inserted = 0
+    total_rr_inserted = 0
+    processed_file_count = 0
+
     try:
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="load_gleif_raw",
+            job_type="raw_load",
+            source="GLEIF Golden Copy public downloads",
+            target_system="postgres",
+            target_table="raw.gleif_lei, raw.gleif_rr",
+            app_env=APP_ENV,
+            metadata_json={
+                "requested_load_date": GLEIF_LOAD_DATE,
+                "max_snapshot_age_days": GLEIF_MAX_SNAPSHOT_AGE_DAYS,
+                "stale_snapshot_policy": GLEIF_STALE_SNAPSHOT_POLICY,
+                "batch_size": GLEIF_LOAD_BATCH_SIZE,
+                "max_rows_per_file": GLEIF_MAX_ROWS_PER_FILE,
+                "rebuild_indexes": GLEIF_REBUILD_INDEXES,
+                "store_raw_row_json": GLEIF_STORE_RAW_ROW_JSON,
+            },
+        )
+
         ensure_raw_gleif_tables(postgres)
 
         if GLEIF_REBUILD_INDEXES:
@@ -868,9 +886,6 @@ def main() -> None:
                 f"No successful GLEIF files found in manifest for load_date={effective_load_date}."
             )
 
-        total_lei_inserted = 0
-        total_rr_inserted = 0
-
         for file_entry in success_files:
             dataset_group = file_entry.get("dataset_group")
             source_name = file_entry.get("source_name")
@@ -880,14 +895,19 @@ def main() -> None:
                 print("Skipping manifest entry without data_object_key.")
                 continue
 
+            processed_file_count += 1
+
             print("------------------------------------------------------------")
             print(f"Source name: {source_name}")
             print(f"Dataset group: {dataset_group}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
+
             if dataset_group == "lei":
                 print("Writing to table: raw.gleif_lei")
             elif dataset_group == "rr":
                 print("Writing to table: raw.gleif_rr")
+            else:
+                print(f"WARNING: unsupported GLEIF dataset_group: {dataset_group}")
 
             if data_object_key.lower().endswith(".zip"):
                 with tempfile.TemporaryDirectory() as tmp_dir:
@@ -919,7 +939,6 @@ def main() -> None:
 
             else:
                 with minio.get_object_stream(data_object_key) as stream:
-
                     row_iterator = iter_csv_rows_from_text_stream(stream)
 
                     lei_count, rr_count = process_gleif_file_rows(
@@ -937,16 +956,87 @@ def main() -> None:
             print("Creating GLEIF indexes after load.")
             create_raw_gleif_indexes(postgres)
 
+        total_inserted = total_lei_inserted + total_rr_inserted
+
+        audit_status = "success"
+
+        if manifest.get("status") == "success_with_warnings":
+            audit_status = "success_with_warnings"
+        elif int(manifest.get("warning_count") or 0) > 0:
+            audit_status = "success_with_warnings"
+
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=audit_status,
+            manifest_key=manifest_key,
+            effective_load_date=effective_load_date,
+            freshness=freshness,
+            files_discovered=len(manifest.get("files", [])),
+            files_processed=processed_file_count,
+            files_success=processed_file_count,
+            files_failed=manifest.get("failed_count"),
+            rows_read=total_inserted,
+            rows_inserted=total_inserted,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "manifest_status": manifest.get("status"),
+                "manifest_success_count": manifest.get("success_count"),
+                "manifest_failed_count": manifest.get("failed_count"),
+                "manifest_warning_count": manifest.get("warning_count"),
+                "manifest_error_count": manifest.get("error_count"),
+                "lei_inserted_rows": total_lei_inserted,
+                "rr_inserted_rows": total_rr_inserted,
+                "batch_size": GLEIF_LOAD_BATCH_SIZE,
+                "max_rows_per_file": GLEIF_MAX_ROWS_PER_FILE,
+                "rebuild_indexes": GLEIF_REBUILD_INDEXES,
+                "store_raw_row_json": GLEIF_STORE_RAW_ROW_JSON,
+            },
+        )
+
         print("------------------------------------------------------------")
         print("GLEIF raw load finished successfully.")
         print(f"Effective GLEIF load date: {effective_load_date}")
         print(f"Freshness status: {freshness['freshness_status']}")
         print(f"Total LEI inserted rows: {total_lei_inserted}")
         print(f"Total RR inserted rows: {total_rr_inserted}")
+        print(f"Total inserted rows: {total_inserted}")
+
+    except Exception as exc:
+        if job_run_id:
+            total_inserted = total_lei_inserted + total_rr_inserted
+
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_key,
+                effective_load_date=effective_load_date,
+                freshness=freshness,
+                files_discovered=len(manifest.get("files", [])) if manifest else None,
+                files_processed=processed_file_count,
+                files_success=processed_file_count,
+                files_failed=manifest.get("failed_count") if manifest else None,
+                rows_read=total_inserted,
+                rows_inserted=total_inserted,
+                warning_count=manifest.get("warning_count") if manifest else None,
+                error_count=manifest.get("error_count") if manifest else None,
+                metadata_json={
+                    "manifest_status": manifest.get("status") if manifest else None,
+                    "lei_inserted_rows": total_lei_inserted,
+                    "rr_inserted_rows": total_rr_inserted,
+                    "batch_size": GLEIF_LOAD_BATCH_SIZE,
+                    "max_rows_per_file": GLEIF_MAX_ROWS_PER_FILE,
+                    "rebuild_indexes": GLEIF_REBUILD_INDEXES,
+                    "store_raw_row_json": GLEIF_STORE_RAW_ROW_JSON,
+                },
+            )
+
+        raise
 
     finally:
         postgres.close()
-
 
 if __name__ == "__main__":
     main()

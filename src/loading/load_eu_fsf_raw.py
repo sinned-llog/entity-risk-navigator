@@ -1,6 +1,5 @@
 import os
 from datetime import datetime, timezone
-from typing import Iterator
 
 try:
     from dotenv import load_dotenv
@@ -8,21 +7,12 @@ try:
 except ImportError:
     pass
 
-import common
 from common.minio_client import MinioClient
 from common.postgres_client import PostgresClient
-from common.manifest_utils import (
-    find_latest_successful_manifest,
-    evaluate_snapshot_freshness,
-    handle_stale_snapshot,
-)
+from common.manifest_utils import find_latest_successful_manifest, evaluate_snapshot_freshness, handle_stale_snapshot
 from common.stream_utils import iter_csv_rows_from_text_stream
-from common.row_utils import (
-    clean_csv_row,
-    get_by_possible_keys,
-    calculate_row_hash,
-    row_to_json_string,
-)
+from common.row_utils import clean_csv_row, get_by_possible_keys, calculate_row_hash, row_to_json_string
+from common.audit_logger import start_job_run, finish_job_run_success, finish_job_run_failure
 
 # -------------------------------------------------------------------
 # Environment configuration
@@ -285,7 +275,6 @@ def insert_eu_fsf_rows(
 # -------------------------------------------------------------------
 # Main job
 # -------------------------------------------------------------------
-
 def main() -> None:
     validate_environment()
 
@@ -304,7 +293,37 @@ def main() -> None:
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
 
+    job_run_id = None
+    manifest_key = None
+    effective_load_date = None
+    manifest = None
+    freshness = None
+    success_files = []
+
+    total_inserted = 0
+    total_rows_read = 0
+    processed_file_count = 0
+
     try:
+        job_run_id = start_job_run(
+            postgres=postgres,
+            job_name="load_eu_fsf_raw",
+            job_type="raw_load",
+            source="EU Financial Sanctions Files",
+            target_system="postgres",
+            target_table="raw.eu_fsf_full_csv",
+            app_env=APP_ENV,
+            metadata_json={
+                "requested_load_date": EU_FSF_LOAD_DATE,
+                "max_snapshot_age_days": EU_FSF_MAX_SNAPSHOT_AGE_DAYS,
+                "stale_snapshot_policy": EU_FSF_STALE_SNAPSHOT_POLICY,
+                "batch_size": EU_FSF_LOAD_BATCH_SIZE,
+                "max_rows_per_file": EU_FSF_MAX_ROWS_PER_FILE,
+                "rebuild_indexes": EU_FSF_REBUILD_INDEXES,
+                "store_raw_row_json": EU_FSF_STORE_RAW_ROW_JSON,
+            },
+        )
+
         ensure_raw_eu_fsf_table(postgres)
 
         if EU_FSF_REBUILD_INDEXES:
@@ -332,8 +351,6 @@ def main() -> None:
                 f"No successful EU FSF files found in manifest for load_date={effective_load_date}."
             )
 
-        total_inserted = 0
-
         for file_entry in success_files:
             source_name = file_entry.get("source_name")
             dataset_group = file_entry.get("dataset_group")
@@ -346,10 +363,12 @@ def main() -> None:
                 print("Skipping manifest entry without data_object_key.")
                 continue
 
+            processed_file_count += 1
+
             print("------------------------------------------------------------")
             print(f"Source name: {source_name}")
             print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
-            print("Writing to table: raw.eu_fsf_full_csv")            
+            print("Writing to table: raw.eu_fsf_full_csv")
 
             delete_existing_rows_for_object(
                 postgres=postgres,
@@ -382,6 +401,8 @@ def main() -> None:
                         break
 
                     file_row_count += 1
+                    total_rows_read += 1
+
                     clean_row = clean_csv_row(row)
 
                     entity_logical_id = get_by_possible_keys(
@@ -539,26 +560,91 @@ def main() -> None:
 
                 file_inserted_count += inserted_count
                 total_inserted += inserted_count
+                prepared_rows = []
 
             if file_row_count == 0:
                 print(f"WARNING: CSV file contains no data rows: {data_object_key}")
                 continue
 
-            print(f"Inserted rows: {file_inserted_count}")
+            print(f"Read rows for file: {file_row_count}")
+            print(f"Inserted rows for file: {file_inserted_count}")
 
         if EU_FSF_REBUILD_INDEXES:
             print("Creating EU FSF indexes after load.")
             create_raw_eu_fsf_indexes(postgres)
 
+        audit_status = "success"
+
+        if manifest.get("status") == "success_with_warnings":
+            audit_status = "success_with_warnings"
+        elif int(manifest.get("warning_count") or 0) > 0:
+            audit_status = "success_with_warnings"
+
+        finish_job_run_success(
+            postgres=postgres,
+            job_run_id=job_run_id,
+            status=audit_status,
+            manifest_key=manifest_key,
+            effective_load_date=effective_load_date,
+            freshness=freshness,
+            files_discovered=len(manifest.get("files", [])),
+            files_processed=processed_file_count,
+            files_success=processed_file_count,
+            files_failed=manifest.get("failed_count"),
+            rows_read=total_rows_read,
+            rows_inserted=total_inserted,
+            warning_count=manifest.get("warning_count"),
+            error_count=manifest.get("error_count"),
+            metadata_json={
+                "manifest_status": manifest.get("status"),
+                "manifest_success_count": manifest.get("success_count"),
+                "manifest_failed_count": manifest.get("failed_count"),
+                "manifest_warning_count": manifest.get("warning_count"),
+                "manifest_error_count": manifest.get("error_count"),
+                "batch_size": EU_FSF_LOAD_BATCH_SIZE,
+                "max_rows_per_file": EU_FSF_MAX_ROWS_PER_FILE,
+                "rebuild_indexes": EU_FSF_REBUILD_INDEXES,
+                "store_raw_row_json": EU_FSF_STORE_RAW_ROW_JSON,
+            },
+        )
+
         print("------------------------------------------------------------")
         print("EU FSF raw load finished successfully.")
         print(f"Effective EU FSF load date: {effective_load_date}")
         print(f"Freshness status: {freshness['freshness_status']}")
+        print(f"Total read rows: {total_rows_read}")
         print(f"Total inserted rows: {total_inserted}")
+
+    except Exception as exc:
+        if job_run_id:
+            finish_job_run_failure(
+                postgres=postgres,
+                job_run_id=job_run_id,
+                error_message=str(exc),
+                manifest_key=manifest_key,
+                effective_load_date=effective_load_date,
+                freshness=freshness,
+                files_discovered=len(manifest.get("files", [])) if manifest else None,
+                files_processed=processed_file_count,
+                files_success=processed_file_count,
+                files_failed=manifest.get("failed_count") if manifest else None,
+                rows_read=total_rows_read,
+                rows_inserted=total_inserted,
+                warning_count=manifest.get("warning_count") if manifest else None,
+                error_count=manifest.get("error_count") if manifest else None,
+                metadata_json={
+                    "manifest_status": manifest.get("status") if manifest else None,
+                    "batch_size": EU_FSF_LOAD_BATCH_SIZE,
+                    "max_rows_per_file": EU_FSF_MAX_ROWS_PER_FILE,
+                    "rebuild_indexes": EU_FSF_REBUILD_INDEXES,
+                    "store_raw_row_json": EU_FSF_STORE_RAW_ROW_JSON,
+                },
+            )
+
+        raise
 
     finally:
         postgres.close()
-
 
 if __name__ == "__main__":
     main()

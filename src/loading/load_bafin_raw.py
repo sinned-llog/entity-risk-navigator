@@ -496,10 +496,9 @@ def main() -> None:
     freshness = None
     success_files = []
     total_inserted = 0
+    processed_files_count = 0
 
     try:
-        ensure_raw_bafin_table(postgres)
-
         job_run_id = start_job_run(
             postgres=postgres,
             job_name="load_bafin_raw",
@@ -518,6 +517,8 @@ def main() -> None:
                 "store_raw_content": BAFIN_STORE_RAW_CONTENT,
             },
         )
+
+        ensure_raw_bafin_table(postgres)
 
         if BAFIN_REBUILD_INDEXES:
             print("Dropping BaFin indexes before load.")
@@ -562,6 +563,11 @@ def main() -> None:
         elif int(manifest.get("warning_count") or 0) > 0:
             audit_status = "success_with_warnings"
 
+        if BAFIN_MAX_FILES > 0:
+            processed_files_count = min(len(success_files), BAFIN_MAX_FILES)
+        else:
+            processed_files_count = len(success_files)
+
         finish_job_run_success(
             postgres=postgres,
             job_run_id=job_run_id,
@@ -570,8 +576,8 @@ def main() -> None:
             effective_load_date=effective_load_date,
             freshness=freshness,
             files_discovered=len(manifest.get("files", [])),
-            files_processed=len(success_files),
-            files_success=len(success_files),
+            files_processed=processed_files_count,
+            files_success=processed_files_count,
             files_failed=manifest.get("failed_count"),
             rows_inserted=total_inserted,
             warning_count=manifest.get("warning_count"),
@@ -605,8 +611,8 @@ def main() -> None:
                 effective_load_date=effective_load_date,
                 freshness=freshness,
                 files_discovered=len(manifest.get("files", [])) if manifest else None,
-                files_processed=len(success_files) if success_files else None,
-                files_success=len(success_files) if success_files else None,
+                files_processed=processed_files_count,
+                files_success=processed_files_count,
                 rows_inserted=total_inserted,
                 warning_count=manifest.get("warning_count") if manifest else None,
                 error_count=manifest.get("error_count") if manifest else None,
