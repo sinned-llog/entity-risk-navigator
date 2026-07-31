@@ -122,6 +122,7 @@ class PostgresClient:
         columns: list[str],
         rows: list[tuple],
         null_marker: str = "\\N",
+        commit: bool = True,
     ) -> int:
         if not rows:
             return 0
@@ -165,7 +166,8 @@ class PostgresClient:
         with self.conn.cursor() as cursor:
             cursor.copy_expert(copy_sql, buffer)
 
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
         return len(rows)
 
@@ -181,3 +183,16 @@ class PostgresClient:
             return None
 
         return row[0]
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def transaction(self):
+        """Context-Manager for explicit transaction control."""
+        self.connect()
+        try:
+            yield
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise

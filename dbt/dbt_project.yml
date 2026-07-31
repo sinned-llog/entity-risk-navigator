@@ -1,0 +1,12 @@
+name: 'entity_risk_navigator'
+version: '1.0.0'
+config-version: 2
+
+profile: 'entity_risk_postgres'
+
+model-paths: ["models"]
+
+models:
+  entity_risk_navigator:
+    staging:
+      +materialized: table

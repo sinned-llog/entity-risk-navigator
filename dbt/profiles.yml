@@ -1,0 +1,12 @@
+entity_risk_postgres:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: postgres     
+      port: 5432
+      user: "{{ env_var('POSTGRES_USER', 'risk_user') }}"
+      pass: "{{ env_var('POSTGRES_PASSWORD', 'change_me') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'risk_radar') }}"
+      schema: staging
+      threads: 4

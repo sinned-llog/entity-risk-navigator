@@ -45,7 +45,7 @@ services:
     depends_on:
       - minio
       - postgres
-    command: tail -f /dev/null
+    command: sh -c "pip install --no-cache-dir -r requirements.txt && tail -f /dev/null"
 
 volumes:
   postgres_data:  

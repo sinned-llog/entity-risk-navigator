@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: gleif_lei_test
+        description: "Raw data of the LEI Golden Copy"
+      - name: gleif_rr_test
+        description: "Raw data of the Relationship Records"
