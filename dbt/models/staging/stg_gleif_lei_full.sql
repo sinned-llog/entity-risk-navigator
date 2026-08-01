@@ -3,7 +3,7 @@
     materialized='table',
     alias='stg_gleif_lei_full',
     indexes=[
-      {'columns': ['lei']},
+      {'columns': ['lei'], unique': True},
       {'columns': ['legal_name_normalized']},
       {'columns': ['entity_status']},
       {'columns': ['source_load_date']}
@@ -35,8 +35,14 @@ deduplicated as (
         )                                                               as legal_name_normalized,
         
         -- Entity & Registration Status (Normalized to lowercase)
-        lower(coalesce(nullif(trim(entity_status), ''), 'unknown'))    as entity_status,
-        lower(nullif(trim(registration_status), ''))                    as registration_status,
+        case
+            when upper(trim(coalesce(entity_status, ''))) in ('', 'NULL', 'N/A') then 'unknown'
+            else lower(trim(entity_status))
+        end as entity_status,
+        case
+            when upper(trim(coalesce(registration_status, ''))) in ('', 'NULL', 'N/A') then 'unknown'
+            else lower(trim(registration_status))
+        end as registration_status,
         
         -- Jurisdictions & Country Codes (Normalized to UPPERCASE)
         upper(nullif(trim(legal_jurisdiction), ''))                     as legal_jurisdiction,
