@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from contextlib import contextmanager
 from psycopg2.extras import execute_values
 from typing import Sequence, Any
 from io import StringIO
@@ -183,8 +184,6 @@ class PostgresClient:
             return None
 
         return row[0]
-
-    from contextlib import contextmanager
 
     @contextmanager
     def transaction(self):

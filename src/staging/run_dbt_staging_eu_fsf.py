@@ -8,11 +8,11 @@ from common.audit_logger import (
 )
 
 APP_ENV = os.getenv("APP_ENV", "dev")
-GLEIF_STAGING_LOAD_DATE = os.getenv("GLEIF_STAGING_LOAD_DATE")
-DBT_PROJECT_DIR = "/app/dbt"
+EU_FSF_STAGING_LOAD_DATE = os.getenv("EU_FSF_STAGING_LOAD_DATE")
+DBT_PROJECT_DIR = os.getenv("DBT_PROJECT_DIR", "/app/dbt")
 
 
-def run_dbt_model(model_name: str, target_table: str):
+def run_dbt_model(model_name: str, target_table: str) -> None:
     postgres = PostgresClient.from_env()
     job_run_id = None
 
@@ -21,35 +21,47 @@ def run_dbt_model(model_name: str, target_table: str):
             postgres=postgres,
             job_name=f"dbt_build_{model_name}",
             job_type="staging",
-            source="GLEIF Raw Schema",
+            source="EU Financial Sanctions Files Raw Schema",
             target_system="postgres",
             target_table=target_table,
             app_env=APP_ENV,
-            metadata_json={"dbt_model": model_name}
+            metadata_json={"dbt_model": model_name},
         )
 
-        # build dbt command (incl. viariable load dates if set)
+        # Build dbt command (incl. variable load dates if set)
         cmd = [
-            "dbt", "run", 
-            "--select", model_name,
-            "--project-dir", DBT_PROJECT_DIR,
-            "--profiles-dir", DBT_PROJECT_DIR
+            "dbt",
+            "run",
+            "--select",
+            model_name,
+            "--project-dir",
+            DBT_PROJECT_DIR,
+            "--profiles-dir",
+            DBT_PROJECT_DIR,
         ]
-        if GLEIF_STAGING_LOAD_DATE:
-            cmd.extend(["--vars", f"{{gleif_staging_load_date: '{GLEIF_STAGING_LOAD_DATE}'}}"])
+
+        if EU_FSF_STAGING_LOAD_DATE:
+            cmd.extend(
+                [
+                    "--vars",
+                    f"{{eu_fsf_staging_load_date: '{EU_FSF_STAGING_LOAD_DATE}'}}",
+                ]
+            )
 
         print(f"Executing: {' '.join(cmd)}")
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         print(result.stdout)
 
-        # request nbr of inserted rows
-        rows_inserted = postgres.fetch_scalar(f"SELECT COUNT(*) FROM {target_table};") or 0
+        # Query number of inserted/processed rows
+        rows_inserted = (
+            postgres.fetch_scalar(f"SELECT COUNT(*) FROM {target_table};") or 0
+        )
 
         finish_job_run_success(
             postgres=postgres,
             job_run_id=job_run_id,
             status="success",
-            effective_load_date=GLEIF_STAGING_LOAD_DATE,
+            effective_load_date=EU_FSF_STAGING_LOAD_DATE,
             rows_read=rows_inserted,
             rows_inserted=rows_inserted,
         )
@@ -69,6 +81,4 @@ def run_dbt_model(model_name: str, target_table: str):
 
 
 if __name__ == "__main__":
-    
-    run_dbt_model("stg_gleif_lei_full", "staging.stg_gleif_lei_full")
-    run_dbt_model("stg_gleif_rr_full", "staging.stg_gleif_rr_full")
+    run_dbt_model("stg_eu_fsf_full", "staging.stg_eu_fsf_full")

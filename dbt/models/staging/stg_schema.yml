@@ -1,0 +1,240 @@
+version: 2
+
+# ===================================================================
+# SOURCES (Raw Layer)
+# ===================================================================
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: gleif_lei_full
+        description: "Raw data of the LEI Golden Copy"
+
+      - name: gleif_rr_full
+        description: "Raw data of the Relationship Records"
+
+      - name: opensanctions_targets
+        description: "Unchanged raw data of the OpenSanctions target stream"
+        columns:
+          - name: raw_id
+            description: "The unique identifier for the target"
+          - name: id
+            description: "Single opensanctions entity ID"
+
+      - name: eu_fsf_full
+        description: "Unchanged raw data of the EU Financial Sanctions Files"
+        columns:
+          - name: raw_id
+            description: "The unique identifier for the target"
+
+      - name: ecb_observations_full
+        description: "Raw landing table containing ECB macroeconomic & financial observations stored in JSONB."
+        columns:
+          - name: raw_id
+            description: "Surrogate primary key from the raw layer."
+
+      - name: bafin_pages
+        description: "Raw landing table containing BaFin web page HTML scrapes and metadata."
+
+# ===================================================================
+# MODELS (Staging Layer)
+# ===================================================================
+models:
+  - name: stg_ecb_observations
+    description: "Cleaned and structured staging table for ECB time-series observation data extracted from JSONB raw rows."
+    columns:
+      - name: stg_ecb_id
+        description: "Surrogate primary key derived from MD5 hash of source_load_date, source_object_key, and raw_id."
+        tests:
+          - unique
+          - not_null
+
+      - name: raw_id
+        description: "Surrogate primary key referenced from the raw layer."
+        tests:
+          - not_null
+
+      - name: series_key
+        description: "Unique ECB series identifier key (e.g., EXR.M.USD.EUR.SP00.A)."
+        tests:
+          - not_null
+
+      - name: dataset_code
+        description: "ECB dataset code (e.g., EXR, BSI, ICP)."
+
+      - name: frequency
+        description: "Normalized frequency code (e.g., M for Monthly, D for Daily, A for Annual)."
+
+      - name: obs_date
+        description: "Parsed standard observation date formatted as YYYY-MM-DD."
+
+      - name: obs_value
+        description: "Parsed numeric observation value."
+
+      - name: obs_status
+        description: "Observation status code flag (e.g., A for Normal, E for Estimated)."
+
+      - name: source_load_date
+        description: "Effective snapshot load date of the source file."
+        tests:
+          - not_null
+
+      - name: raw_loaded_at
+        description: "Timestamp when the raw record was inserted into PostgreSQL."
+
+      - name: staging_loaded_at
+        description: "Timestamp when the staging record was processed by dbt."
+
+  - name: stg_opensanctions
+    description: "Cleaned and structured staging table for OpenSanctions targets including row hash and raw row JSONB."
+    columns:
+      - name: raw_id
+        description: "Surrogate primary key from the raw layer."
+        tests:
+          - unique
+          - not_null
+
+      - name: opensanctions_id
+        description: "Unique OpenSanctions entity identifier."
+        tests:
+          - not_null
+
+      - name: row_hash
+        description: "MD5 hash of the data row for change data capture (CDC) detection."
+        tests:
+          - not_null
+
+  - name: stg_gleif_lei_full
+    description: "Deduplicated and cleaned staging model for GLEIF LEI (Legal Entity Identifier) data."
+    columns:
+      - name: lei
+        description: "20-character Legal Entity Identifier (LEI) code acting as the primary entity identifier."
+        tests:
+          - unique
+          - not_null
+
+      - name: raw_id
+        description: "Surrogate primary key from the raw layer."
+        tests:
+          - not_null
+
+      - name: legal_name_normalized
+        description: "Normalized legal name (trimmed, lowercased, multiple spaces replaced) for fuzzy matching."
+
+      - name: entity_status
+        description: "Operational status of the entity (e.g., ACTIVE, INACTIVE, UNKNOWN)."
+        tests:
+          - not_null
+
+      - name: row_hash
+        description: "MD5 hash over core business attributes for change data capture (CDC) detection."
+        tests:
+          - not_null
+
+      - name: raw_row
+        description: "JSONB dump of raw source attributes for full auditing and lineage."
+
+      - name: loaded_at
+        description: "Timestamp when the staging record was processed by dbt."
+
+  - name: stg_gleif_rr_full
+    description: "Cleaned and structured staging model for GLEIF Relationship Records (RR) defining corporate structures and ownership links."
+    columns:
+      - name: raw_id
+        description: "Surrogate primary key from the raw layer."
+        tests:
+          - not_null
+
+      - name: relationship_key
+        description: "Surrogate primary key derived from the MD5 hash of start_node_id, end_node_id, and relationship_type."
+        tests:
+          - not_null
+
+      - name: start_node_id
+        description: "Entity identifier (LEI) of the child/originating node in the relationship."
+        tests:
+          - not_null
+
+      - name: end_node_id
+        description: "Entity identifier (LEI) of the parent/destination node in the relationship."
+        tests:
+          - not_null
+
+      - name: relationship_type
+        description: "Type of relationship between start and end nodes (e.g., IS_DIRECTLY_CONSOLIDATED_BY)."
+        tests:
+          - not_null
+
+      - name: relationship_status
+        description: "Status of the relationship record (e.g., ACTIVE, INACTIVE, UNKNOWN)."
+        tests:
+          - not_null
+
+      - name: row_hash
+        description: "MD5 hash over key relationship attributes for change data capture (CDC) detection."
+        tests:
+          - not_null
+
+      - name: loaded_at
+        description: "Timestamp when the record was processed into the staging layer by dbt."
+
+  - name: stg_eu_fsf_full
+    description: "Cleaned and structured staging table for EU Financial Sanctions Files (EU FSF) extracted from JSONB raw rows."
+    columns:
+      - name: stg_eu_fsf_id
+        description: "Surrogate primary key generated from source_load_date, source_object_key, and row_number."
+        tests:
+          - unique
+          - not_null
+
+      - name: raw_id
+        description: "Surrogate primary key referenced from the raw layer."
+        tests:
+          - not_null
+
+      - name: entity_logical_id
+        description: "Logical entity ID provided by the EU FSF source system."
+
+      - name: entity_type
+        description: "Classification of the entity (e.g., person, enterprise)."
+
+      - name: row_hash
+        description: "MD5 hash of the raw row for change data capture (CDC) detection."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Effective snapshot load date of the source file."
+        tests:
+          - not_null
+
+      - name: raw_loaded_at
+        description: "Timestamp when the raw record was inserted into PostgreSQL."
+
+  - name: stg_bafin_pages_full
+    description: "Full staging model for BaFin entity database records, normalized and cleaned."
+    columns:
+      - name: stg_bafin_id
+        description: "Surrogate Primary Key (MD5 hash of bafin_institut_id/candidate_id and source_object_key)."
+        tests:
+          - unique
+          - not_null
+
+      - name: bafin_institut_id
+        description: "Official BaFin Institute ID / BaFin-ID (uppercase)."
+
+      - name: lei
+        description: "Legal Entity Identifier (if available, uppercase)."
+
+      - name: legal_name
+        description: "Official legal name of the entity scraped from BaFin."
+
+      - name: source_object_key
+        description: "MinIO path of the raw HTML/data file."
+        tests:
+          - not_null
+
+      - name: row_hash
+        description: "MD5 hash over normalized core attribute values to support change detection."
+        tests:
+          - not_null

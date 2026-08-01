@@ -8,5 +8,5 @@ entity_risk_postgres:
       user: "{{ env_var('POSTGRES_USER', 'risk_user') }}"
       pass: "{{ env_var('POSTGRES_PASSWORD', 'change_me') }}"
       dbname: "{{ env_var('POSTGRES_DB', 'risk_radar') }}"
-      schema: staging
+      schema: public
       threads: 4

@@ -272,7 +272,7 @@ def ensure_raw_gleif_test_tables(postgres: PostgresClient) -> None:
     postgres.ensure_schemas()
     postgres.execute(
         """
-        CREATE TABLE IF NOT EXISTS raw.gleif_lei_test (
+        CREATE TABLE IF NOT EXISTS raw.gleif_lei_full (
             raw_id BIGSERIAL PRIMARY KEY,
             app_env TEXT,
             source TEXT,
@@ -298,7 +298,7 @@ def ensure_raw_gleif_test_tables(postgres: PostgresClient) -> None:
             loaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS raw.gleif_rr_test (
+        CREATE TABLE IF NOT EXISTS raw.gleif_rr_full (
             raw_id BIGSERIAL PRIMARY KEY,
             app_env TEXT,
             source TEXT,
@@ -585,7 +585,7 @@ def process_gleif_file_rows(
             file_entry=file_entry,
             data_object_key=data_object_key,
             effective_load_date=effective_load_date,
-            table_name="raw.gleif_lei_test",
+            table_name="raw.gleif_lei_full",
             columns=LEI_COLUMNS,
             map_fn=map_lei_row_minimal,
         )
@@ -599,7 +599,7 @@ def process_gleif_file_rows(
             file_entry=file_entry,
             data_object_key=data_object_key,
             effective_load_date=effective_load_date,
-            table_name="raw.gleif_rr_test",
+            table_name="raw.gleif_rr_full",
             columns=RR_COLUMNS,
             map_fn=map_rr_row_minimal,
         )
@@ -619,7 +619,7 @@ def main() -> None:
 
     print("------------------------------------------------------------")
     print("Loading GLEIF raw data OPTIMIZED")
-    print("Target tables: raw.gleif_lei_test, raw.gleif_rr_test")
+    print("Target tables: raw.gleif_lei_full, raw.gleif_rr_full")
     print("Insert mode: PostgreSQL COPY (Transaction Isolated)")
     print(f"Batch size: {GLEIF_LOAD_BATCH_SIZE}")
 
@@ -641,11 +641,11 @@ def main() -> None:
     try:
         job_run_id = start_job_run(
             postgres=postgres,
-            job_name="load_gleif_raw_minimal_test",
+            job_name="load_gleif_raw_full",
             job_type="raw_load",
             source="GLEIF Golden Copy public downloads",
             target_system="postgres",
-            target_table="raw.gleif_lei_test, raw.gleif_rr_test",
+            target_table="raw.gleif_lei_full, raw.gleif_rr_full",
             app_env=APP_ENV,
             metadata_json={
                 "requested_load_date": GLEIF_LOAD_DATE,
@@ -672,7 +672,7 @@ def main() -> None:
         if not success_files:
             raise RuntimeError(
                 f"No successful GLEIF files found for dataset groups "
-                f"{sorted(GLEIF_DATASET_GROUPS_TO_LOAD)} and load_date={effective_load_date}."
+                f"{sorted(ENABLED_DATASET_GROUPS)} and load_date={effective_load_date}."
             )
 
         for file_entry in success_files:

@@ -1,26 +1,33 @@
-import os
-import json
 import hashlib
+import json
+import logging
+import os
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
-from common.minio_client import MinioClient
-from common.postgres_client import PostgresClient
+from common.audit_logger import (
+    finish_job_run_failure,
+    finish_job_run_success,
+    start_job_run,
+)
 from common.manifest_utils import (
-    find_latest_successful_manifest,
     evaluate_snapshot_freshness,
+    find_latest_successful_manifest,
     handle_stale_snapshot,
 )
-from common.audit_logger import (
-    start_job_run,
-    finish_job_run_success,
-    finish_job_run_failure,
-)
+from common.minio_client import MinioClient
+from common.postgres_client import PostgresClient
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # Environment configuration
@@ -38,8 +45,8 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 LOAD_DT = datetime.now(timezone.utc)
 LOAD_TIMESTAMP_UTC = LOAD_DT.isoformat()
 
-# If set: load exactly this snapshot.
-# If not set: load latest successful BaFin snapshot from MinIO.
+# If set: load explicitly this snapshot.
+# If not set: search for the latest successful BaFin manifest in MinIO.
 BAFIN_LOAD_DATE = os.getenv("BAFIN_LOAD_DATE")
 
 BAFIN_MAX_SNAPSHOT_AGE_DAYS = int(
@@ -52,31 +59,27 @@ BAFIN_STALE_SNAPSHOT_POLICY = os.getenv(
     "warn",
 ).lower()
 
-BAFIN_LOAD_BATCH_SIZE = int(
-    os.getenv("BAFIN_LOAD_BATCH_SIZE", "100")
-)
+BAFIN_LOAD_BATCH_SIZE = int(os.getenv("BAFIN_LOAD_BATCH_SIZE", "100"))
 
 # 0 = unlimited
-BAFIN_MAX_FILES = int(
-    os.getenv("BAFIN_MAX_FILES", "0")
-)
+BAFIN_MAX_FILES = int(os.getenv("BAFIN_MAX_FILES", "0"))
 
 BAFIN_REBUILD_INDEXES = (
     os.getenv("BAFIN_REBUILD_INDEXES", "false").lower() == "true"
 )
 
-# For BaFin HTML pages this can stay true in dev.
-# If pages become large, set to false and rely on MinIO + content_hash.
+# Store raw HTML/JSON string in Postgres. If false, only sha256 hash is computed.
 BAFIN_STORE_RAW_CONTENT = (
     os.getenv("BAFIN_STORE_RAW_CONTENT", "true").lower() == "true"
 )
 
 
 # -------------------------------------------------------------------
-# Validation
+# Environment Validation
 # -------------------------------------------------------------------
 
 def validate_environment() -> None:
+    """Validate that required environment variables are set and properly configured."""
     required_values = {
         "MINIO_BUCKET": MINIO_BUCKET,
         "POSTGRES_HOST": POSTGRES_HOST,
@@ -86,11 +89,7 @@ def validate_environment() -> None:
         "POSTGRES_PASSWORD": POSTGRES_PASSWORD,
     }
 
-    missing = [
-        key
-        for key, value in required_values.items()
-        if not value
-    ]
+    missing = [key for key, value in required_values.items() if not value]
 
     if missing:
         raise RuntimeError(
@@ -104,10 +103,11 @@ def validate_environment() -> None:
 
 
 # -------------------------------------------------------------------
-# PostgreSQL setup
+# Database Table & Index Management
 # -------------------------------------------------------------------
 
 def ensure_raw_bafin_table(postgres: PostgresClient) -> None:
+    """Ensures raw schema and the target raw.bafin_pages table exist."""
     postgres.ensure_schemas()
 
     postgres.execute(
@@ -153,6 +153,7 @@ def ensure_raw_bafin_table(postgres: PostgresClient) -> None:
 
 
 def drop_raw_bafin_indexes(postgres: PostgresClient) -> None:
+    """Drops secondary indexes for faster bulk COPY performance."""
     postgres.execute(
         """
         DROP INDEX IF EXISTS raw.idx_bafin_pages_bafin_institut_id;
@@ -164,7 +165,9 @@ def drop_raw_bafin_indexes(postgres: PostgresClient) -> None:
         """
     )
 
+
 def create_raw_bafin_indexes(postgres: PostgresClient) -> None:
+    """Re-creates secondary indexes post COPY ingestion."""
     postgres.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_bafin_pages_bafin_institut_id
@@ -187,13 +190,15 @@ def create_raw_bafin_indexes(postgres: PostgresClient) -> None:
         """
     )
 
+
 # -------------------------------------------------------------------
-# Manifest / freshness helpers
+# Manifest & Freshness Resolution
 # -------------------------------------------------------------------
 
 def resolve_bafin_manifest(
     minio: MinioClient,
-) -> tuple[str, str, dict, dict]:
+) -> Tuple[str, str, dict, dict]:
+    """Locates the target manifest in MinIO and verifies snapshot freshness policy."""
     if BAFIN_LOAD_DATE:
         manifest_key = (
             f"bafin/_manifests/load_date={BAFIN_LOAD_DATE}/download_bafin_manifest.json"
@@ -201,21 +206,23 @@ def resolve_bafin_manifest(
 
         if not minio.object_exists(manifest_key):
             raise RuntimeError(
-                f"BaFin manifest not found in MinIO: "
-                f"s3://{MINIO_BUCKET}/{manifest_key}. "
-                "Run download_bafin.py first or set BAFIN_LOAD_DATE correctly."
+                f"BaFin manifest not found in MinIO: s3://{MINIO_BUCKET}/{manifest_key}. "
+                "Run download_bafin.py first or verify BAFIN_LOAD_DATE."
             )
 
         manifest = minio.get_json_object(manifest_key)
         effective_load_date = BAFIN_LOAD_DATE
 
     else:
-        print("BAFIN_LOAD_DATE not set. Searching latest successful BaFin manifest in MinIO.")
-
-        manifest_key, effective_load_date, manifest = find_latest_successful_manifest(
-            minio=minio,
-            manifest_prefix="bafin/_manifests/",
-            manifest_filename="download_bafin_manifest.json",
+        logger.info(
+            "BAFIN_LOAD_DATE not set. Searching for latest successful BaFin manifest in MinIO."
+        )
+        manifest_key, effective_load_date, manifest = (
+            find_latest_successful_manifest(
+                minio=minio,
+                manifest_prefix="bafin/_manifests/",
+                manifest_filename="download_bafin_manifest.json",
+            )
         )
 
     freshness = evaluate_snapshot_freshness(
@@ -233,33 +240,25 @@ def resolve_bafin_manifest(
 
 
 # -------------------------------------------------------------------
-# Stream helpers
+# Stream & Hashing Helpers
 # -------------------------------------------------------------------
 
 def read_text_and_hash_from_stream(
-    stream,
+    stream: Any,
     encoding: str = "utf-8-sig",
     store_content: bool = True,
     chunk_size: int = 1024 * 1024,
-) -> tuple[str | None, str]:
-    """
-    Reads an object stream in chunks.
-
-    If store_content is False, this does not accumulate the full object
-    in memory and only calculates the SHA256 hash.
-    """
-
+) -> Tuple[Optional[str], str]:
+    """Reads object content in chunks to calculate SHA256 hash and extract string body."""
     hasher = hashlib.sha256()
     chunks = []
 
     while True:
         chunk = stream.read(chunk_size)
-
         if not chunk:
             break
 
         hasher.update(chunk)
-
         if store_content:
             chunks.append(chunk)
 
@@ -275,14 +274,16 @@ def read_text_and_hash_from_stream(
 
     return raw_content, content_hash
 
+
 # -------------------------------------------------------------------
-# Database helpers
+# Database Operations
 # -------------------------------------------------------------------
 
 def delete_existing_rows_for_object(
     postgres: PostgresClient,
     source_object_key: str,
 ) -> None:
+    """Removes previously loaded records for the given object key to support idempotency."""
     postgres.execute(
         """
         DELETE FROM raw.bafin_pages
@@ -294,8 +295,9 @@ def delete_existing_rows_for_object(
 
 def insert_bafin_rows(
     postgres: PostgresClient,
-    rows: list[tuple],
+    rows: List[Tuple[Any, ...]],
 ) -> int:
+    """Executes high-performance COPY insertion into raw.bafin_pages within an active transaction."""
     return postgres.copy_rows(
         table_name="raw.bafin_pages",
         columns=[
@@ -328,33 +330,33 @@ def insert_bafin_rows(
         rows=rows,
     )
 
+
 # -------------------------------------------------------------------
-# Mapping
+# Record Mapping
 # -------------------------------------------------------------------
 
 def map_bafin_file_entry(
     minio: MinioClient,
-    file_entry: dict,
+    file_entry: Dict[str, Any],
     file_number: int,
     effective_load_date: str,
-) -> tuple:
+) -> Tuple[Any, ...]:
+    """Retrieves file & metadata from MinIO and returns a tuple structured for database COPY."""
     data_object_key = file_entry.get("data_object_key")
     metadata_object_key = file_entry.get("metadata_object_key")
 
     if not data_object_key:
         raise RuntimeError("BaFin manifest entry is missing data_object_key.")
 
-    metadata = {}
+    metadata: Dict[str, Any] = {}
 
     if metadata_object_key:
         try:
             metadata = minio.get_json_object(metadata_object_key)
         except Exception as exc:
-            print(
-                f"WARNING: Could not load metadata object "
-                f"{metadata_object_key}: {exc}"
+            logger.warning(
+                f"Could not load metadata object {metadata_object_key}: {exc}"
             )
-            metadata = {}
 
     with minio.get_object_stream(data_object_key) as stream:
         raw_content, content_hash = read_text_and_hash_from_stream(
@@ -362,7 +364,7 @@ def map_bafin_file_entry(
             store_content=BAFIN_STORE_RAW_CONTENT,
         )
 
-    # Prefer metadata/file_entry hash if present, but keep calculated hash as fallback.
+    # Prefer metadata/file_entry SHA256 if available, fallback to computed stream hash
     source_hash = (
         metadata.get("sha256")
         or file_entry.get("sha256")
@@ -399,92 +401,86 @@ def map_bafin_file_entry(
 
 
 # -------------------------------------------------------------------
-# Processing
+# File Batch Processing
 # -------------------------------------------------------------------
 
 def process_bafin_files(
     minio: MinioClient,
     postgres: PostgresClient,
-    success_files: list[dict],
+    success_files: List[Dict[str, Any]],
     effective_load_date: str,
 ) -> int:
+    """Iterates through manifest entries, reads content from MinIO, and batch-inserts into Postgres."""
     total_inserted = 0
-    prepared_rows = []
+    prepared_rows: List[Tuple[Any, ...]] = []
 
     for file_number, file_entry in enumerate(success_files, start=1):
         if BAFIN_MAX_FILES > 0 and file_number > BAFIN_MAX_FILES:
-            print(
-                f"Reached BAFIN_MAX_FILES={BAFIN_MAX_FILES}. "
-                "Stopping BaFin file processing."
+            logger.info(
+                f"Reached BAFIN_MAX_FILES={BAFIN_MAX_FILES}. Stopping file processing."
             )
             break
 
         data_object_key = file_entry.get("data_object_key")
-
         if not data_object_key:
-            print("Skipping BaFin manifest entry without data_object_key.")
+            logger.warning("Skipping BaFin manifest entry missing data_object_key.")
             continue
 
-        print("------------------------------------------------------------")
-        print(f"Candidate ID: {file_entry.get('candidate_id')}")
-        print(f"Search name: {file_entry.get('search_name')}")
-        print(f"Legal name: {file_entry.get('legal_name')}")
-        print(f"Object: s3://{MINIO_BUCKET}/{data_object_key}")
-        print("Writing to table: raw.bafin_pages")
-
-        delete_existing_rows_for_object(
-            postgres=postgres,
-            source_object_key=data_object_key,
+        logger.info(
+            f"[{file_number}/{len(success_files)}] Processing candidate "
+            f"'{file_entry.get('candidate_id')}' -> s3://{MINIO_BUCKET}/{data_object_key}"
         )
 
-        prepared_rows.append(
-            map_bafin_file_entry(
-                minio=minio,
-                file_entry=file_entry,
-                file_number=file_number,
-                effective_load_date=effective_load_date,
+        # Wrap object cleanup and COPY insertion inside a transaction block
+        with postgres.transaction():
+            delete_existing_rows_for_object(
+                postgres=postgres,
+                source_object_key=data_object_key,
             )
-        )
 
-        if len(prepared_rows) >= BAFIN_LOAD_BATCH_SIZE:
+            prepared_rows.append(
+                map_bafin_file_entry(
+                    minio=minio,
+                    file_entry=file_entry,
+                    file_number=file_number,
+                    effective_load_date=effective_load_date,
+                )
+            )
+
+            if len(prepared_rows) >= BAFIN_LOAD_BATCH_SIZE:
+                inserted_count = insert_bafin_rows(
+                    postgres=postgres,
+                    rows=prepared_rows,
+                )
+                total_inserted += inserted_count
+                prepared_rows = []
+                logger.info(f"Inserted BaFin rows so far: {total_inserted}")
+
+    # Insert remaining buffer
+    if prepared_rows:
+        with postgres.transaction():
             inserted_count = insert_bafin_rows(
                 postgres=postgres,
                 rows=prepared_rows,
             )
-
             total_inserted += inserted_count
-            prepared_rows = []
-
-            print(f"Inserted BaFin rows so far: {total_inserted}")
-
-    if prepared_rows:
-        inserted_count = insert_bafin_rows(
-            postgres=postgres,
-            rows=prepared_rows,
-        )
-
-        total_inserted += inserted_count
 
     return total_inserted
 
 
 # -------------------------------------------------------------------
-# Main job
+# Main Ingestion Runner
 # -------------------------------------------------------------------
+
 def main() -> None:
+    """Main execution entrypoint for loading raw BaFin data from MinIO into Postgres."""
     validate_environment()
 
-    print("------------------------------------------------------------")
-    print("Loading BaFin raw pages")
-    print("Target table: raw.bafin_pages")
-    print("Insert mode: PostgreSQL COPY")
-    print(f"Requested BAFIN_LOAD_DATE: {BAFIN_LOAD_DATE or 'not set'}")
-    print(f"Stale snapshot policy: {BAFIN_STALE_SNAPSHOT_POLICY}")
-    print(f"Max snapshot age days: {BAFIN_MAX_SNAPSHOT_AGE_DAYS}")
-    print(f"Batch size: {BAFIN_LOAD_BATCH_SIZE}")
-    print(f"Max files: {BAFIN_MAX_FILES or 'unlimited'}")
-    print(f"Rebuild indexes: {BAFIN_REBUILD_INDEXES}")
-    print(f"Store raw content: {BAFIN_STORE_RAW_CONTENT}")
+    logger.info("------------------------------------------------------------")
+    logger.info("Starting BaFin Raw Load from MinIO")
+    logger.info("Target table: raw.bafin_pages")
+    logger.info(f"Requested BAFIN_LOAD_DATE: {BAFIN_LOAD_DATE or 'not set'}")
+    logger.info(f"Batch size: {BAFIN_LOAD_BATCH_SIZE}")
 
     minio = MinioClient.from_env()
     postgres = PostgresClient.from_env()
@@ -494,11 +490,11 @@ def main() -> None:
     effective_load_date = None
     manifest = None
     freshness = None
-    success_files = []
     total_inserted = 0
     processed_files_count = 0
 
     try:
+        # Start audit job tracking
         job_run_id = start_job_run(
             postgres=postgres,
             job_name="load_bafin_raw",
@@ -521,18 +517,16 @@ def main() -> None:
         ensure_raw_bafin_table(postgres)
 
         if BAFIN_REBUILD_INDEXES:
-            print("Dropping BaFin indexes before load.")
+            logger.info("Dropping BaFin indexes before bulk COPY load.")
             drop_raw_bafin_indexes(postgres)
 
-        manifest_key, effective_load_date, manifest, freshness = resolve_bafin_manifest(
-            minio=minio,
+        manifest_key, effective_load_date, manifest, freshness = (
+            resolve_bafin_manifest(minio=minio)
         )
 
-        print("------------------------------------------------------------")
-        print(f"Using BaFin manifest: s3://{MINIO_BUCKET}/{manifest_key}")
-        print(f"Effective BaFin load date: {effective_load_date}")
-        print(f"Freshness status: {freshness['freshness_status']}")
-        print(f"Snapshot age days: {freshness['snapshot_age_days']}")
+        logger.info(f"Using manifest: s3://{MINIO_BUCKET}/{manifest_key}")
+        logger.info(f"Effective load date: {effective_load_date}")
+        logger.info(f"Freshness status: {freshness['freshness_status']}")
 
         success_files = [
             file
@@ -553,21 +547,23 @@ def main() -> None:
         )
 
         if BAFIN_REBUILD_INDEXES:
-            print("Creating BaFin indexes after load.")
+            logger.info("Re-creating BaFin indexes after bulk COPY load.")
             create_raw_bafin_indexes(postgres)
 
         audit_status = "success"
-
-        if manifest.get("status") == "success_with_warnings":
+        if (
+            manifest.get("status") == "success_with_warnings"
+            or int(manifest.get("warning_count") or 0) > 0
+        ):
             audit_status = "success_with_warnings"
-        elif int(manifest.get("warning_count") or 0) > 0:
-            audit_status = "success_with_warnings"
 
-        if BAFIN_MAX_FILES > 0:
-            processed_files_count = min(len(success_files), BAFIN_MAX_FILES)
-        else:
-            processed_files_count = len(success_files)
+        processed_files_count = (
+            min(len(success_files), BAFIN_MAX_FILES)
+            if BAFIN_MAX_FILES > 0
+            else len(success_files)
+        )
 
+        # Log successful completion to audit database
         finish_job_run_success(
             postgres=postgres,
             job_run_id=job_run_id,
@@ -586,22 +582,18 @@ def main() -> None:
                 "manifest_status": manifest.get("status"),
                 "manifest_success_count": manifest.get("success_count"),
                 "manifest_failed_count": manifest.get("failed_count"),
-                "manifest_warning_count": manifest.get("warning_count"),
-                "manifest_error_count": manifest.get("error_count"),
                 "store_raw_content": BAFIN_STORE_RAW_CONTENT,
                 "batch_size": BAFIN_LOAD_BATCH_SIZE,
                 "max_files": BAFIN_MAX_FILES,
-                "rebuild_indexes": BAFIN_REBUILD_INDEXES,
             },
         )
 
-        print("------------------------------------------------------------")
-        print("BaFin raw load finished successfully.")
-        print(f"Effective BaFin load date: {effective_load_date}")
-        print(f"Freshness status: {freshness['freshness_status']}")
-        print(f"Total inserted rows: {total_inserted}")
+        logger.info("------------------------------------------------------------")
+        logger.info("BaFin raw load finished successfully.")
+        logger.info(f"Total inserted rows: {total_inserted}")
 
     except Exception as exc:
+        logger.error(f"BaFin raw load failed: {str(exc)}", exc_info=True)
         if job_run_id:
             finish_job_run_failure(
                 postgres=postgres,
@@ -614,21 +606,12 @@ def main() -> None:
                 files_processed=processed_files_count,
                 files_success=processed_files_count,
                 rows_inserted=total_inserted,
-                warning_count=manifest.get("warning_count") if manifest else None,
-                error_count=manifest.get("error_count") if manifest else None,
-                metadata_json={
-                    "manifest_status": manifest.get("status") if manifest else None,
-                    "store_raw_content": BAFIN_STORE_RAW_CONTENT,
-                    "batch_size": BAFIN_LOAD_BATCH_SIZE,
-                    "max_files": BAFIN_MAX_FILES,
-                    "rebuild_indexes": BAFIN_REBUILD_INDEXES,
-                },
             )
-
         raise
 
     finally:
         postgres.close()
+
 
 if __name__ == "__main__":
     main()
