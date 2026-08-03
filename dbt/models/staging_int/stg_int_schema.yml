@@ -1,0 +1,221 @@
+version: 2
+
+# ===================================================================
+# STAGING / INTERMEDIATE MODELS
+# ===================================================================
+models:
+  - name: stg_int_entity_candidates
+    description: "Intermediate entity candidate list based on staged GLEIF LEI data."
+    columns:
+      - name: entity_candidate_id
+        tests:
+          - not_null
+          - unique
+
+      - name: lei
+        tests:
+          - not_null
+          - unique
+
+      - name: legal_name_normalized
+        tests:
+          - not_null
+
+      - name: source_load_date
+        tests:
+          - not_null
+
+  - name: stg_int_gleif_parent_summary
+    description: "Intermediate GLEIF parent summary with direct and ultimate parent information per LEI."
+    columns:
+      - name: lei
+        tests:
+          - not_null
+          - unique
+
+      - name: legal_name_normalized
+        tests:
+          - not_null
+
+      - name: has_direct_parent
+        tests:
+          - not_null
+
+      - name: has_ultimate_parent
+        tests:
+          - not_null
+
+      - name: has_any_parent
+        tests:
+          - not_null
+
+  - name: stg_int_eu_fsf_subjects
+    description: "Intermediate EU FSF subjects with one row per sanctioned subject."
+    columns:
+      - name: eu_fsf_subject_id
+        description: "Deterministic surrogate key for the EU FSF subject."
+        tests:
+          - not_null
+          - unique
+
+      - name: eu_fsf_subject_key
+        description: "Stable business key for the EU FSF subject, based on EU reference number or entity logical ID."
+        tests:
+          - not_null
+          - unique
+
+      - name: entity_logical_id
+        description: "EU FSF logical entity ID."
+        tests:
+          - not_null
+
+      - name: entity_eu_reference_number
+        description: "EU FSF reference number for the sanctioned subject."
+
+      - name: entity_type
+        description: "Normalized entity type, for example person or enterprise."
+        tests:
+          - not_null
+
+      - name: entity_subject_type
+        description: "EU FSF subject type code, for example P or E."
+        tests:
+          - not_null
+
+      - name: entity_publication_date
+        description: "Publication date of the entity (DATE)."
+
+      - name: programmes
+        description: "Semicolon-separated list of sanctions programmes connected to the subject."
+
+      - name: regulation_types
+        description: "Semicolon-separated list of regulation types connected to the subject."
+
+      - name: regulation_number_titles
+        description: "Semicolon-separated list of regulation number titles connected to the subject."
+
+      - name: source_row_count
+        description: "Number of source rows from stg_eu_fsf_full contributing to this subject."
+        tests:
+          - not_null
+
+      - name: name_alias_count
+        description: "Number of distinct name alias records for this subject."
+        tests:
+          - not_null
+
+      - name: address_count
+        description: "Number of distinct address records for this subject."
+        tests:
+          - not_null
+
+      - name: birthdate_count
+        description: "Number of distinct birthdate records for this subject."
+        tests:
+          - not_null
+
+      - name: identification_count
+        description: "Number of distinct identification records for this subject."
+        tests:
+          - not_null
+
+      - name: citizenship_count
+        description: "Number of distinct citizenship records for this subject."
+        tests:
+          - not_null
+
+      - name: is_sanctioned
+        description: "Boolean flag indicating that the subject is sanctioned."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true]
+
+      - name: source_load_date
+        description: "Snapshot load date from the source staging table."
+        tests:
+          - not_null
+
+      - name: intermediate_loaded_at
+        description: "Timestamp when the intermediate model was built."
+        tests:
+          - not_null
+
+  - name: stg_int_eu_fsf_names
+    description: "Intermediate EU FSF names and aliases with one row per subject-name combination."
+    columns:
+      - name: eu_fsf_name_id
+        description: "Deterministic surrogate key for an EU FSF subject-name record."
+        tests:
+          - not_null
+          - unique
+
+      - name: eu_fsf_subject_id
+        description: "Reference to the EU FSF subject intermediate table."
+        tests:
+          - not_null
+
+      - name: eu_fsf_subject_key
+        description: "Stable EU FSF subject business key."
+        tests:
+          - not_null
+
+      - name: entity_logical_id
+        description: "EU FSF logical entity ID."
+        tests:
+          - not_null
+
+      - name: entity_eu_reference_number
+        description: "EU FSF reference number."
+
+      - name: entity_type
+        description: "Normalized entity type, e.g. person or enterprise."
+        tests:
+          - not_null
+
+      - name: entity_subject_type
+        description: "EU FSF subject type code, e.g. P or E."
+        tests:
+          - not_null
+
+      - name: eu_fsf_name_source_key
+        description: "Source-level key for the EU FSF name record, based on name_alias_logical_id or deterministic fallback."
+        tests:
+          - not_null
+
+      - name: name_alias_logical_id
+        description: "EU FSF logical ID of the name alias, if provided."
+
+      - name: name_type
+        description: "Type of EU FSF name record."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['name_alias']
+
+      - name: name
+        description: "Original EU FSF whole name."
+        tests:
+          - not_null
+
+      - name: name_normalized
+        description: "Normalized whole name used for matching."
+        tests:
+          - not_null
+
+      - name: source_row_count
+        description: "Number of source rows contributing to this name record."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Snapshot load date from source staging table."
+        tests:
+          - not_null
+
+      - name: intermediate_loaded_at
+        description: "Timestamp when the intermediate model was built."
+        tests:
+          - not_null
