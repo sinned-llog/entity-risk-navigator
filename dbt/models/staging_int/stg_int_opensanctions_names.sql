@@ -73,18 +73,12 @@ split_aliases as (
         'alias_name' as name_type,
         concat('alias_', a.alias_ordinal::text) as name_source_key,
         a.alias_ordinal::integer as name_position,
-
         nullif(
             trim(
                 regexp_replace(
-                    regexp_replace(
-                        trim(a.alias_value),
-                        '^"+|"+$',
-                        '',
-                        'g'
-                    ),
-                    '""+',
+                    trim(a.alias_value),
                     '"',
+                    '',
                     'g'
                 )
             ),
@@ -96,14 +90,9 @@ split_aliases as (
                 lower(
                     trim(
                         regexp_replace(
-                            regexp_replace(
-                                trim(a.alias_value),
-                                '^"+|"+$',
-                                '',
-                                'g'
-                            ),
-                            '""+',
+                            trim(a.alias_value),
                             '"',
+                            '',
                             'g'
                         )
                     )
