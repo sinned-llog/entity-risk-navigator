@@ -1,4 +1,7 @@
+
+import argparse
 import os
+import sys  
 import subprocess
 from common.postgres_client import PostgresClient
 from common.audit_logger import (
@@ -27,10 +30,10 @@ INTERMEDIATE_MODELS = [
         "source": "staging.stg_gleif_lei_full, staging.stg_gleif_rr_full"
     },
     {
-            "model_name": "stg_int_eu_fsf_subjects", 
-            "target_table": "staging.stg_int_eu_fsf_subjects",
-            "is_view": False,  # Materialized as table -> actual row count inserted
-            "source": "staging.stg_eu_fsf_full"
+        "model_name": "stg_int_eu_fsf_subjects", 
+        "target_table": "staging.stg_int_eu_fsf_subjects",
+        "is_view": False,  # Materialized as table -> actual row count inserted
+        "source": "staging.stg_eu_fsf_full"
         },
     {
         "model_name": "stg_int_eu_fsf_names", 
@@ -38,13 +41,30 @@ INTERMEDIATE_MODELS = [
         "is_view": False,  # Physical table -> exact inserted rows logged
         "source": "staging.stg_eu_fsf_full, staging.stg_int_eu_fsf_subjects"
     },
+    {
+        "model_name": "stg_int_opensanctions_targets", 
+        "target_table": "staging.stg_int_opensanctions_targets",
+        "is_view": False,  # Physical table -> exact inserted rows logged
+        "source": "staging.stg_opensanctions"
+        },
+    {
+        "model_name": "stg_int_opensanctions_names", 
+        "target_table": "staging.stg_int_opensanctions_names",
+        "is_view": False,  # Physical table -> exact inserted rows logged
+        "source": "staging.stg_opensanctions"
+    },
 ]
 
 
-def run_dbt_model(model_name: str, target_table: str, source: str, is_view: bool = True):
+def run_dbt_model(model_config: dict):
     """
     Executes a single dbt intermediate model and tracks its status in the audit logging system.
     """
+    model_name = model_config["model_name"]
+    target_table = model_config["target_table"]
+    source = model_config.get("source", "Staging Layer")
+    is_view = model_config.get("is_view", True)
+    
     postgres = PostgresClient.from_env()
     job_run_id = None
 
@@ -118,14 +138,26 @@ def run_dbt_model(model_name: str, target_table: str, source: str, is_view: bool
 
 
 if __name__ == "__main__":
-    print(f"Starting Intermediate dbt Pipeline execution ({len(INTERMEDIATE_MODELS)} models)...")
+    # CLI Argument-Parser für flexible Einzel-Ausführungen
+    parser = argparse.ArgumentParser(description="Run Intermediate dbt Pipeline Models.")
+    parser.add_argument(
+        "--select", 
+        nargs="+", 
+        help="Specific model name(s) to execute. Example: --select stg_int_opensanctions_targets"
+    )
+    args = parser.parse_args()
+
+    # Filtern, falls spezifische Modelle angefordert wurden
+    models_to_run = INTERMEDIATE_MODELS
+    if args.select:
+        models_to_run = [m for m in INTERMEDIATE_MODELS if m["model_name"] in args.select]
+        if not models_to_run:
+            print(f"Error: Selected model(s) {args.select} not found in INTERMEDIATE_MODELS config.")
+            sys.exit(1)
+
+    print(f"Starting Pipeline execution ({len(models_to_run)} model(s))...")
     
-    for item in INTERMEDIATE_MODELS:
-        run_dbt_model(
-            model_name=item["model_name"], 
-            target_table=item["target_table"],
-            source=item.get("source", "Staging Layer"),
-            is_view=item.get("is_view", True)
-        )
+    for item in models_to_run:
+        run_dbt_model(item)
         
-    print("\nIntermediate dbt Pipeline execution finished successfully.")
+    print("\nPipeline execution finished successfully.")

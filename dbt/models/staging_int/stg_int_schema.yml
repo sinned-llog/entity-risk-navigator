@@ -219,3 +219,192 @@ models:
         description: "Timestamp when the intermediate model was built."
         tests:
           - not_null
+
+  - name: stg_int_opensanctions_targets
+    description: "Intermediate OpenSanctions targets model containing canonical sanctioned entities with normalized names and parsed timestamps."
+    columns:
+      - name: opensanctions_target_id
+        description: "Deterministic primary surrogate key generated via MD5 hash."
+        tests:
+          - not_null
+          - unique
+
+      - name: opensanctions_id
+        description: "Original OpenSanctions entity ID."
+        tests:
+          - not_null
+          - unique
+
+      - name: schema_name
+        description: "OpenSanctions schema entity type (e.g. Person, Company, Vessel)."
+
+      - name: caption
+        description: "Primary display name of the target entity."
+        tests:
+          - not_null
+
+      - name: caption_normalized
+        description: "Cleaned and normalized caption used for fuzzy matching."
+        tests:
+          - not_null
+
+      - name: aliases
+        description: "Raw string of alternative names/aliases."
+
+      - name: aliases_normalized
+        description: "Normalized alternative names for matching."
+
+      - name: birth_date_raw
+        description: "Unparsed birth date string from source (can be YYYY, YYYY-MM, or YYYY-MM-DD)."
+
+      - name: countries
+        description: "Upper-case country codes associated with the target."
+
+      - name: addresses
+        description: "Physical address records associated with the target."
+
+      - name: identifiers
+        description: "Official registration or identity document numbers."
+
+      - name: sanctions
+        description: "Details regarding specific sanctions records."
+
+      - name: phones
+        description: "Contact phone numbers."
+
+      - name: emails
+        description: "Contact email addresses."
+
+      - name: program_ids
+        description: "IDs of specific sanctions programs."
+
+      - name: datasets
+        description: "Source datasets contributing to this OpenSanctions target."
+
+      - name: first_seen_raw
+        description: "Raw first-seen string from source."
+
+      - name: last_seen_raw
+        description: "Raw last-seen string from source."
+
+      - name: last_change_raw
+        description: "Raw last-change string from source."
+
+      - name: opensanctions_first_seen_at
+        description: "Parsed ISO timestamp when target was first observed."
+
+      - name: opensanctions_last_seen_at
+        description: "Parsed ISO timestamp when target was last observed."
+
+      - name: opensanctions_last_change_at
+        description: "Parsed ISO timestamp of last modification."
+
+      - name: has_aliases
+        description: "Flag indicating whether target has alias records."
+        tests:
+          - not_null
+
+      - name: has_countries
+        description: "Flag indicating whether country information exists."
+        tests:
+          - not_null
+
+      - name: has_identifiers
+        description: "Flag indicating whether identification documents exist."
+        tests:
+          - not_null
+
+      - name: has_sanctions
+        description: "Flag indicating whether sanction detail records exist."
+        tests:
+          - not_null
+
+      - name: is_sanctioned
+        description: "Boolean flag confirming target is sanctioned."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true]
+
+      - name: source_load_date
+        description: "Snapshot load date from the source staging model."
+        tests:
+          - not_null
+
+      - name: raw_id
+        description: "Reference to the source raw row ID."
+
+      - name: row_hash
+        description: "Hash value for tracking changes in source record."
+
+      - name: intermediate_loaded_at
+        description: "Timestamp when the intermediate model was materialized."
+        tests:
+          - not_null
+  
+  - name: stg_int_opensanctions_names
+    description: "Name index / bridge table for entity search and matching. Contains primary names and split, cleaned aliases."
+    columns:
+      - name: opensanctions_name_id
+        description: "Generated unique MD5 hash for the specific name-target combination."
+        tests:
+          - unique
+          - not_null
+
+      - name: opensanctions_target_id
+        description: "Reference to stg_int_opensanctions_targets."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_int_opensanctions_targets')
+                field: opensanctions_target_id
+
+      - name: opensanctions_id
+        description: "Original OpenSanctions ID of the associated target."
+        tests:
+          - not_null
+
+      - name: name_type
+        description: "Categorization of the name: 'primary_name' or 'alias_name'."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['primary_name', 'alias_name']
+
+      - name: name_source_key
+        description: "Origin key of the name entry (e.g., 'caption' or 'alias_1')."
+        tests:
+          - not_null
+
+      - name: name_position
+        description: "Position index of the name (0 for primary name, >=1 for aliases)."
+        tests:
+          - not_null
+
+      - name: name
+        description: "Original name string, preserving source wording and Unicode/original script."
+        tests:
+          - not_null
+
+      - name: name_normalized
+        description: "Lowercased and whitespace-normalized name used for matching. Unicode/original script is preserved."
+        tests:
+          - not_null
+
+      - name: has_non_ascii
+        description: "Boolean flag indicating whether the name contains characters outside the basic ASCII range."
+        tests:
+          - not_null
+      
+      - name: source_load_date
+        description: "Partition/load date of the OpenSanctions source data."
+        tests:
+          - not_null
+
+      - name: intermediate_loaded_at
+        description: "Timestamp when the intermediate model was built."
+        tests:
+          - not_null

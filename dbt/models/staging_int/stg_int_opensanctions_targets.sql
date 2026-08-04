@@ -46,7 +46,11 @@ with cleaned_source as (
         nullif(upper(trim(countries)), '') as countries,
         nullif(trim(addresses), '') as addresses,
         nullif(trim(identifiers), '') as identifiers,
-        nullif(trim(sanctions), '') as sanctions,
+        case
+            when nullif(trim(sanctions), '') is null then null
+            when regexp_replace(trim(sanctions), '"', '', 'g') = '' then null
+            else nullif(trim(sanctions), '')
+        end as sanctions,
         nullif(trim(phones), '') as phones,
         nullif(trim(emails), '') as emails,
         nullif(trim(program_ids), '') as program_ids,
@@ -68,23 +72,25 @@ with cleaned_source as (
 base as (
 
     select
-        *,
+        cleaned_source.*,
 
-        -- Sicheres Parseausdrücke für Standard ISO-Timestamps (z.B. YYYY-MM-DDTHH:MI:SS)
-        case 
-            when first_seen_raw ~ '^\d{4}-\d{2}-\d{2}' then first_seen_raw::timestamp
+        case
+            when first_seen_raw ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+                then first_seen_raw::timestamp
             else null
-        end as first_seen_at,
+        end as opensanctions_first_seen_at,
 
-        case 
-            when last_seen_raw ~ '^\d{4}-\d{2}-\d{2}' then last_seen_raw::timestamp
+        case
+            when last_seen_raw ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+                then last_seen_raw::timestamp
             else null
-        end as last_seen_at,
+        end as opensanctions_last_seen_at,
 
-        case 
-            when last_change_raw ~ '^\d{4}-\d{2}-\d{2}' then last_change_raw::timestamp
+        case
+            when last_change_raw ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+                then last_change_raw::timestamp
             else null
-        end as last_change_at
+        end as opensanctions_last_change_at
 
     from cleaned_source
 
@@ -115,9 +121,9 @@ canonical_targets as (
         first_seen_raw,
         last_seen_raw,
         last_change_raw,
-        first_seen_at,
-        last_seen_at,
-        last_change_at,
+        opensanctions_first_seen_at as first_seen_at,
+        opensanctions_last_seen_at as last_seen_at,
+        opensanctions_last_change_at as last_change_at,
         source_load_date,
         source_object_key,
         metadata_object_key,
@@ -132,7 +138,7 @@ canonical_targets as (
                 partition by opensanctions_id
                 order by
                     source_load_date desc,
-                    last_change_at desc nulls last,
+                    opensanctions_last_change_at desc nulls last,
                     raw_id desc
             ) as target_rank
 
@@ -165,7 +171,8 @@ final as (
         aliases_normalized,
 
         birth_date_raw,
-
+        birth_date_raw is not null as has_birth_date,
+        
         countries,
         addresses,
         identifiers,
@@ -178,7 +185,6 @@ final as (
         first_seen_raw,
         last_seen_raw,
         last_change_raw,
-
         first_seen_at,
         last_seen_at,
         last_change_at,
