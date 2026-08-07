@@ -1,0 +1,612 @@
+version: 2
+
+models:
+  - name: mart_entity_sanctions_screening
+    description: "Dashboard-ready sanctions screening mart with one row per entity-sanctions match. Built from the intermediate sanctions match table and intentionally limited to business-facing screening and quality fields."
+
+    columns:
+      - name: entity_sanctions_match_id
+        description: "Unique identifier for the entity-sanctions match."
+        tests:
+          - not_null
+          - unique
+
+      - name: entity_candidate_id
+        description: "Reference to the matched entity candidate."
+        tests:
+          - not_null
+
+      - name: lei
+        description: "Legal Entity Identifier of the matched entity."
+        tests:
+          - not_null
+
+      - name: legal_name
+        description: "Legal name of the matched entity."
+        tests:
+          - not_null
+
+      - name: legal_name_normalized
+        description: "Normalized legal name of the matched entity."
+
+      - name: country
+        description: "Country associated with the entity candidate."
+
+      - name: entity_status
+        description: "GLEIF entity status."
+
+      - name: registration_status
+        description: "GLEIF registration status."
+
+      - name: sanctions_source
+        description: "Sanctions source system."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['eu_fsf', 'opensanctions']
+
+      - name: sanctions_entity_type
+        description: "Sanctions-side entity type."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['enterprise', 'organization', 'company', 'legalentity']
+
+      - name: sanction_subject_id
+        description: "Unified sanctioned subject identifier."
+        tests:
+          - not_null
+
+      - name: source_subject_id
+        description: "Source-level sanctioned subject or target identifier."
+        tests:
+          - not_null
+
+      - name: source_entity_key
+        description: "Stable source entity key from the sanctions source."
+        tests:
+          - not_null
+
+      - name: sanctions_name_id
+        description: "Unified sanctions name identifier."
+        tests:
+          - not_null
+
+      - name: sanctions_name
+        description: "Sanctions name that matched the entity."
+        tests:
+          - not_null
+
+      - name: sanctions_subject_primary_name
+        description: "Primary name or caption of the sanctioned subject where available."
+
+      - name: source_name_type
+        description: "Type of the matched sanctions name."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['name_alias', 'primary_name', 'alias_name']
+
+      - name: is_primary_name
+        description: "Whether the matched sanctions name is a primary name."
+        tests:
+          - not_null
+
+      - name: match_type
+        description: "Technical match type."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['exact_name_match_key']
+
+      - name: match_score
+        description: "Base technical match score."
+        tests:
+          - not_null
+
+      - name: match_quality_score
+        description: "Quality-adjusted match score."
+        tests:
+          - not_null
+
+      - name: match_quality_tier
+        description: "Business-facing match quality tier."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['high_confidence', 'medium_confidence', 'review_required']
+
+      - name: match_quality_reasons
+        description: "Semicolon-separated reasons explaining the quality tier."
+
+      - name: match_quality_rank
+        description: "Numeric rank for sorting match quality tiers. Lower values are stronger."
+        tests:
+          - not_null
+
+      - name: is_potential_risk_match
+        description: "True for high_confidence and medium_confidence matches."
+        tests:
+          - not_null
+
+      - name: is_high_confidence_match
+        description: "True if the match quality tier is high_confidence."
+        tests:
+          - not_null
+
+      - name: is_medium_confidence_match
+        description: "True if the match quality tier is medium_confidence."
+        tests:
+          - not_null
+
+      - name: is_review_required_match
+        description: "True if the match quality tier is review_required."
+        tests:
+          - not_null
+
+      - name: is_short_match_key
+        description: "True if the match key is short and therefore weaker."
+        tests:
+          - not_null
+
+      - name: is_generic_match_key
+        description: "True if the match key is considered generic or weak."
+        tests:
+          - not_null
+
+      - name: has_country_overlap
+        description: "True if entity country overlaps with sanctions source countries."
+        tests:
+          - not_null
+
+      - name: country_overlap_status
+        description: "Status of country comparison between entity and sanctions subject."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 'country_overlap'
+                  - 'country_mismatch'
+                  - 'entity_country_missing'
+                  - 'sanctions_country_missing'
+
+      - name: has_identifier_overlap
+        description: "True if the LEI or source candidate ID appears in the sanctions source identifiers."
+        tests:
+          - not_null
+
+      - name: sanction_context_summary
+        description: "Shortened sanctions context for dashboard display."
+
+      - name: source_programs
+        description: "Sanctions programmes or programme IDs from the source."
+
+      - name: source_lists
+        description: "Sanctions lists or datasets from the source, shortened for dashboard use."
+
+      - name: source_countries
+        description: "Countries provided by the sanctions source where available."
+
+      - name: source_reference_url
+        description: "Reference URL where available, mainly EU FSF."
+
+      - name: source_load_date
+        description: "Latest source load date relevant for the match."
+        tests:
+          - not_null
+
+      - name: staging_loaded_at
+        description: "Timestamp when the intermediate staging match was built."
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart was built."
+        tests:
+          - not_null
+  
+  - name: mart_entity_master
+    description: "Dashboard-ready entity master mart with one row per GLEIF-based entity candidate, enriched with GLEIF parent relationship context."
+
+    columns:
+      - name: entity_candidate_id
+        description: "Unique entity candidate identifier from the intermediate entity candidate model."
+        tests:
+          - not_null
+          - unique
+
+      - name: candidate_source
+        description: "Source of the entity candidate, currently gleif."
+        tests:
+          - not_null
+
+      - name: candidate_source_id
+        description: "Source-level candidate identifier."
+        tests:
+          - not_null
+
+      - name: lei
+        description: "Legal Entity Identifier."
+        tests:
+          - not_null
+          - unique
+
+      - name: legal_name
+        description: "Legal name of the entity."
+        tests:
+          - not_null
+
+      - name: legal_name_normalized
+        description: "Normalized legal name of the entity."
+        tests:
+          - not_null
+
+      - name: entity_status
+        description: "GLEIF entity status."
+        tests:
+          - not_null
+
+      - name: registration_status
+        description: "GLEIF registration status."
+
+      - name: legal_jurisdiction
+        description: "Legal jurisdiction of the entity."
+
+      - name: country
+        description: "Best available country code for the entity."
+
+      - name: legal_address_country
+        description: "Country code from the legal address."
+
+      - name: headquarters_address_country
+        description: "Country code from the headquarters address."
+
+      - name: direct_parent_lei
+        description: "LEI of the direct parent where available."
+
+      - name: direct_parent_name
+        description: "Legal name of the direct parent where available."
+
+      - name: direct_parent_name_normalized
+        description: "Normalized legal name of the direct parent where available."
+
+      - name: ultimate_parent_lei
+        description: "LEI of the ultimate parent where available."
+
+      - name: ultimate_parent_name
+        description: "Legal name of the ultimate parent where available."
+
+      - name: ultimate_parent_name_normalized
+        description: "Normalized legal name of the ultimate parent where available."
+
+      - name: has_direct_parent
+        description: "Boolean flag indicating whether a direct parent is available."
+        tests:
+          - not_null
+
+      - name: has_ultimate_parent
+        description: "Boolean flag indicating whether an ultimate parent is available."
+        tests:
+          - not_null
+
+      - name: has_any_parent
+        description: "Boolean flag indicating whether any parent relationship is available."
+        tests:
+          - not_null
+
+      - name: next_renewal_date
+        description: "Next GLEIF renewal date where available."
+
+      - name: last_update_date
+        description: "Last GLEIF update date where available."
+
+      - name: source_load_date
+        description: "Source load date from the entity candidate layer."
+        tests:
+          - not_null
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart was built."
+        tests:
+          - not_null
+
+  - name: mart_entity_risk_score
+    description: "Entity-level risk score mart with one row per GLEIF-based entity candidate. Aggregates sanctions screening results into business-facing risk indicators."
+
+    columns:
+      - name: entity_candidate_id
+        description: "Unique entity candidate identifier."
+        tests:
+          - not_null
+          - unique
+
+      - name: candidate_source
+        description: "Source of the entity candidate, currently gleif."
+        tests:
+          - not_null
+
+      - name: candidate_source_id
+        description: "Source-level candidate identifier."
+        tests:
+          - not_null
+
+      - name: lei
+        description: "Legal Entity Identifier."
+        tests:
+          - not_null
+          - unique
+
+      - name: legal_name
+        description: "Legal name of the entity."
+        tests:
+          - not_null
+
+      - name: legal_name_normalized
+        description: "Normalized legal name of the entity."
+        tests:
+          - not_null
+
+      - name: entity_status
+        description: "GLEIF entity status."
+        tests:
+          - not_null
+
+      - name: registration_status
+        description: "GLEIF registration status."
+
+      - name: legal_jurisdiction
+        description: "Legal jurisdiction of the entity."
+
+      - name: country
+        description: "Best available country code for the entity."
+
+      - name: legal_address_country
+        description: "Country code from the legal address."
+
+      - name: headquarters_address_country
+        description: "Country code from the headquarters address."
+
+      - name: direct_parent_lei
+        description: "LEI of the direct parent where available."
+
+      - name: direct_parent_name
+        description: "Legal name of the direct parent where available."
+
+      - name: ultimate_parent_lei
+        description: "LEI of the ultimate parent where available."
+
+      - name: ultimate_parent_name
+        description: "Legal name of the ultimate parent where available."
+
+      - name: has_direct_parent
+        description: "Boolean flag indicating whether a direct parent is available."
+        tests:
+          - not_null
+
+      - name: has_ultimate_parent
+        description: "Boolean flag indicating whether an ultimate parent is available."
+        tests:
+          - not_null
+
+      - name: has_any_parent
+        description: "Boolean flag indicating whether any parent relationship is available."
+        tests:
+          - not_null
+
+      - name: total_sanctions_match_count
+        description: "Total number of sanctions matches for the entity."
+        tests:
+          - not_null
+
+      - name: high_confidence_match_count
+        description: "Number of high confidence sanctions matches."
+        tests:
+          - not_null
+
+      - name: medium_confidence_match_count
+        description: "Number of medium confidence sanctions matches."
+        tests:
+          - not_null
+
+      - name: review_required_match_count
+        description: "Number of sanctions matches requiring review."
+        tests:
+          - not_null
+
+      - name: sanctions_source_count
+        description: "Number of distinct sanctions sources matched for the entity."
+        tests:
+          - not_null
+
+      - name: distinct_sanction_subject_count
+        description: "Number of distinct sanctioned subjects matched for the entity."
+        tests:
+          - not_null
+
+      - name: sanctions_sources
+        description: "Semicolon-separated list of matched sanctions sources."
+
+      - name: match_quality_tiers
+        description: "Semicolon-separated list of match quality tiers observed for the entity."
+
+      - name: sanctions_programs
+        description: "Semicolon-separated list of sanctions programmes or programme IDs observed in matched records."
+
+      - name: sanctions_lists
+        description: "Semicolon-separated list of sanctions lists, regulation types or datasets observed in matched records."
+
+      - name: max_match_quality_score
+        description: "Maximum match quality score across all matches for the entity."
+
+      - name: best_match_quality_rank
+        description: "Best match quality rank across all matches for the entity. Lower values are stronger."
+
+      - name: has_sanctions_match
+        description: "True if the entity has at least one sanctions match."
+        tests:
+          - not_null
+
+      - name: has_high_confidence_match
+        description: "True if the entity has at least one high confidence sanctions match."
+        tests:
+          - not_null
+
+      - name: has_medium_confidence_match
+        description: "True if the entity has at least one medium confidence sanctions match."
+        tests:
+          - not_null
+
+      - name: has_review_required_match
+        description: "True if the entity has at least one review-required sanctions match."
+        tests:
+          - not_null
+
+      - name: risk_score
+        description: "Entity-level risk score derived from sanctions match quality."
+        tests:
+          - not_null
+
+      - name: risk_tier
+        description: "Entity-level risk tier derived from sanctions match quality."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['high', 'medium', 'review', 'low_or_no_known_match']
+
+      - name: risk_reasons
+        description: "Semicolon-separated reasons explaining the risk tier."
+
+      - name: source_load_date
+        description: "Latest source load date across the entity and sanctions screening inputs."
+        tests:
+          - not_null
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart was built."
+        tests:
+          - not_null
+
+  - name: mart_pipeline_audit_status
+    description: "Dashboard-ready pipeline audit status mart with one row per latest job and target table combination."
+
+    columns:
+      - name: job_run_id
+        description: "Unique identifier of the latest audit job run."
+        tests:
+          - not_null
+
+      - name: job_name
+        description: "Name of the pipeline or dbt job."
+        tests:
+          - not_null
+
+      - name: job_type
+        description: "Type of job, e.g. staging, intermediate, mart or ingestion."
+        tests:
+          - not_null
+
+      - name: source
+        description: "Source system or upstream table description for the job."
+
+      - name: target_system
+        description: "Target system of the job, usually postgres."
+
+      - name: target_table
+        description: "Target table written or represented by the job."
+        tests:
+          - not_null
+
+      - name: app_env
+        description: "Application environment, e.g. dev."
+
+      - name: status
+        description: "Latest job status."
+        tests:
+          - not_null
+
+      - name: is_successful_latest_run
+        description: "True if the latest run for this job and target table completed successfully."
+        tests:
+          - not_null
+
+      - name: is_failed_or_incomplete_latest_run
+        description: "True if the latest run did not complete successfully."
+        tests:
+          - not_null
+
+      - name: started_at
+        description: "Timestamp when the latest job run started."
+        tests:
+          - not_null
+
+      - name: finished_at
+        description: "Timestamp when the latest job run finished."
+
+      - name: duration_seconds
+        description: "Runtime duration of the latest job run in seconds."
+
+      - name: effective_load_date
+        description: "Effective load date used by the job where available."
+
+      - name: rows_read
+        description: "Number of rows read or counted by the job."
+        tests:
+          - not_null
+
+      - name: rows_inserted
+        description: "Number of rows inserted or materialized by the job."
+        tests:
+          - not_null
+
+      - name: total_run_count
+        description: "Total number of audit runs observed for this job and target table."
+        tests:
+          - not_null
+
+      - name: success_run_count
+        description: "Number of successful audit runs observed for this job and target table."
+        tests:
+          - not_null
+
+      - name: failed_or_incomplete_run_count
+        description: "Number of failed or incomplete audit runs observed for this job and target table."
+        tests:
+          - not_null
+
+      - name: last_success_at
+        description: "Most recent successful finish timestamp for this job and target table."
+
+      - name: last_failure_at
+        description: "Most recent failed or incomplete finish timestamp for this job and target table."
+
+      - name: has_successful_run
+        description: "True if the job and target table have at least one successful run."
+        tests:
+          - not_null
+
+      - name: pipeline_health_status
+        description: "Business-facing health status for the latest pipeline run."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 'healthy'
+                  - 'latest_failed_previous_success_available'
+                  - 'not_healthy'
+
+      - name: error_message
+        description: "Error message from the latest run, if available."
+
+      - name: metadata_json
+        description: "Additional job metadata captured by the audit logger."
+
+      - name: mart_loaded_at
+        description: "Timestamp when the audit status mart was built."
+        tests:
+          - not_null

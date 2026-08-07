@@ -408,3 +408,428 @@ models:
         description: "Timestamp when the intermediate model was built."
         tests:
           - not_null
+
+      - name: stg_int_sanction_subjects_unified
+        description: "Unified sanctioned subject/target table combining EU FSF subjects and OpenSanctions targets with source-level sanctions context."
+
+        columns:
+          - name: sanction_subject_id
+            description: "Deterministic unique MD5 hash for the unified sanctioned subject record."
+            tests:
+              - not_null
+              - unique
+
+          - name: sanctions_source
+            description: "Source system of the sanctioned subject record."
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['eu_fsf', 'opensanctions']
+
+          - name: source_subject_id
+            description: "Source-level subject or target identifier."
+            tests:
+              - not_null
+
+          - name: source_entity_key
+            description: "Stable source entity key, e.g. EU FSF subject key or OpenSanctions ID."
+            tests:
+              - not_null
+
+          - name: source_logical_id
+            description: "Source-specific logical entity identifier."
+            tests:
+              - not_null
+
+          - name: source_reference_number
+            description: "Source-specific reference number or identifier."
+            tests:
+              - not_null
+
+          - name: entity_type
+            description: "Entity type from the source, e.g. person, enterprise, company, organization, vessel, cryptowallet or legalentity."
+            tests:
+              - not_null
+
+          - name: entity_subject_type
+            description: "EU FSF subject type where available. Null for OpenSanctions records."
+
+          - name: primary_name
+            description: "Primary source caption/name where available. Mostly populated for OpenSanctions targets."
+
+          - name: primary_name_normalized
+            description: "Normalized primary source caption/name where available."
+
+          - name: is_sanctioned
+            description: "Boolean flag indicating whether the subject/target is treated as sanctioned."
+            tests:
+              - not_null
+
+          - name: source_sanction_context
+            description: "Generic source-level sanctions context. EU FSF uses regulation titles; OpenSanctions uses the sanctions field."
+
+          - name: source_programs
+            description: "Generic source-level sanctions programmes or programme IDs."
+
+          - name: source_lists
+            description: "Generic source-level source lists, regulation types or datasets."
+
+          - name: source_datasets
+            description: "Source datasets where available, mainly OpenSanctions."
+
+          - name: source_reference_numbers
+            description: "Source-level sanctions reference numbers or identifiers."
+
+          - name: source_reference_date
+            description: "Source-level sanctions reference date where available."
+
+          - name: source_reference_url
+            description: "Source-level sanctions reference URL where available."
+
+          - name: source_countries
+            description: "Source-level countries field where available."
+
+          - name: source_identifiers
+            description: "Source-level identifiers field where available."
+
+          - name: source_context_raw
+            description: "Raw or semi-raw source sanctions context for audit and explanation."
+
+          - name: source_first_seen_raw
+            description: "Raw first-seen timestamp from source aggregator where available, mainly OpenSanctions."
+
+          - name: source_last_seen_raw
+            description: "Raw last-seen timestamp from source aggregator where available, mainly OpenSanctions."
+
+          - name: source_last_change_raw
+            description: "Raw last-change timestamp from source aggregator where available, mainly OpenSanctions."
+
+          - name: source_load_date
+            description: "Source snapshot or partition load date."
+            tests:
+              - not_null
+
+          - name: source_object_key
+            description: "Object key of the source file"
+
+      - name: stg_int_sanctions_matches
+        description: "Intermediate exact sanctions matches between GLEIF-based entity candidates and unified sanctions names. The physical table is materialized as staging.stg_int_entity_sanctions_matches. Includes match quality flags and review indicators."
+
+        columns:
+          - name: entity_sanctions_match_id
+            description: "Deterministic unique MD5 hash for the entity-sanctions match."
+            tests:
+              - not_null
+              - unique
+
+          - name: entity_candidate_id
+            description: "Reference to the entity candidate from stg_int_entity_candidates."
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: ref('stg_int_entity_candidates')
+                    field: entity_candidate_id
+
+          - name: candidate_source
+            description: "Source of the entity candidate, currently gleif."
+            tests:
+              - not_null
+
+          - name: candidate_source_id
+            description: "Source-level candidate identifier."
+            tests:
+              - not_null
+
+          - name: lei
+            description: "Legal Entity Identifier of the matched entity candidate."
+            tests:
+              - not_null
+
+          - name: legal_name
+            description: "Legal name of the entity candidate."
+            tests:
+              - not_null
+
+          - name: legal_name_normalized
+            description: "Normalized legal name of the entity candidate."
+            tests:
+              - not_null
+
+          - name: entity_name_match_key
+            description: "Matching key generated from the entity legal name."
+            tests:
+              - not_null
+
+          - name: entity_name_match_key_length
+            description: "Character length of the entity name match key."
+            tests:
+              - not_null
+
+          - name: sanctions_name_id
+            description: "Reference to the unified sanctions name record."
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: ref('stg_int_sanctions_names_unified')
+                    field: sanctions_name_id
+
+          - name: sanction_subject_id
+            description: "Reference to the unified sanctioned subject or target record."
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: ref('stg_int_sanctions_subjects_unified')
+                    field: sanction_subject_id
+
+          - name: sanctions_source
+            description: "Sanctions source system."
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['eu_fsf', 'opensanctions']
+
+          - name: source_name_id
+            description: "Source-level sanctions name identifier."
+            tests:
+              - not_null
+
+          - name: source_subject_id
+            description: "Source-level sanctioned subject or target identifier."
+            tests:
+              - not_null
+
+          - name: source_entity_key
+            description: "Stable source entity key, e.g. EU FSF subject key or OpenSanctions ID."
+            tests:
+              - not_null
+
+          - name: sanctions_entity_type
+            description: "Entity type from the sanctions name source."
+            tests:
+              - not_null
+
+          - name: sanctions_entity_subject_type
+            description: "EU FSF subject type where available. Null for OpenSanctions records."
+
+          - name: source_name_type
+            description: "Name type in the sanctions source."
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['name_alias', 'primary_name', 'alias_name']
+
+          - name: is_primary_name
+            description: "Boolean flag indicating whether the matched sanctions name is the primary source name."
+            tests:
+              - not_null
+
+          - name: sanctions_name
+            description: "Original sanctions name that matched the entity candidate."
+            tests:
+              - not_null
+
+          - name: sanctions_name_normalized
+            description: "Normalized sanctions name."
+            tests:
+              - not_null
+
+          - name: sanctions_name_match_key
+            description: "Matching key from the sanctions name record."
+            tests:
+              - not_null
+
+          - name: has_non_ascii
+            description: "Boolean flag indicating whether the matched sanctions name contains non-ASCII characters."
+            tests:
+              - not_null
+
+          - name: sanctions_subject_primary_name
+            description: "Primary name or caption from the unified sanctioned subject or target table."
+
+          - name: sanctions_subject_primary_name_normalized
+            description: "Normalized primary name or caption from the unified sanctioned subject or target table."
+
+          - name: is_sanctioned
+            description: "Boolean flag from the unified sanctions subject or target context."
+            tests:
+              - not_null
+
+          - name: source_sanction_context
+            description: "Generic source-level sanctions context from the unified sanctions subject table."
+
+          - name: source_programs
+            description: "Generic source-level sanctions programmes or programme IDs."
+
+          - name: source_lists
+            description: "Generic source-level source lists, regulation types or datasets."
+
+          - name: source_datasets
+            description: "Source datasets where available, mainly OpenSanctions."
+
+          - name: source_reference_numbers
+            description: "Source-level sanctions reference numbers or identifiers."
+
+          - name: source_reference_date
+            description: "Source-level sanctions reference date where available."
+
+          - name: source_reference_url
+            description: "Source-level sanctions reference URL where available."
+
+          - name: source_countries
+            description: "Source-level countries field where available."
+
+          - name: source_identifiers
+            description: "Source-level identifiers field where available."
+
+          - name: source_context_raw
+            description: "Raw or semi-raw source sanctions context for audit and explanation."
+
+          - name: source_first_seen_raw
+            description: "Raw first-seen timestamp from source aggregator where available."
+
+          - name: source_last_seen_raw
+            description: "Raw last-seen timestamp from source aggregator where available."
+
+          - name: source_last_change_raw
+            description: "Raw last-change timestamp from source aggregator where available."
+
+          - name: match_type
+            description: "Type of match used."
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['exact_name_match_key']
+
+          - name: match_score
+            description: "Base numeric score for the technical match. Exact matches currently receive 100."
+            tests:
+              - not_null
+
+          - name: match_rank
+            description: "Rank of the retained match after deduplication."
+            tests:
+              - not_null
+
+          - name: match_quality_score
+            description: "Quality-adjusted score based on identifier overlap, country overlap, source-specific context availability, primary/alias name type, short keys and generic keys. EU FSF matches can receive medium confidence when country context is unavailable but the exact alias match is otherwise clean."
+            tests:
+              - not_null
+
+          - name: match_quality_tier
+            description: "Quality tier for downstream review and filtering."
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['high_confidence', 'medium_confidence', 'review_required']
+
+          - name: match_quality_reasons
+            description: "Semicolon-separated explanation of the quality tier, e.g. identifier_overlap, country_overlap, country_mismatch, sanctions_country_missing, eu_fsf_country_context_not_available, short_match_key, generic_match_key, primary_name_match or alias_name_match."
+
+          - name: is_short_match_key
+            description: "True if the entity match key has three or fewer characters."
+            tests:
+              - not_null
+
+          - name: is_very_short_match_key
+            description: "True if the entity match key has two or fewer characters."
+            tests:
+              - not_null
+
+          - name: is_generic_match_key
+            description: "True if the entity match key is considered generic or weak, e.g. llc, ltd, bank, group, rt, ana, clara."
+            tests:
+              - not_null
+
+          - name: has_country_information
+            description: "True if both the entity country and sanctions source countries are available."
+            tests:
+              - not_null
+
+          - name: has_country_overlap
+            description: "True if the entity country appears in the source countries from the sanctions subject context."
+            tests:
+              - not_null
+
+          - name: country_overlap_status
+            description: "Country comparison status between entity country and sanctions subject countries."
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values:
+                      - 'country_overlap'
+                      - 'country_mismatch'
+                      - 'entity_country_missing'
+                      - 'sanctions_country_missing'
+
+          - name: has_identifier_overlap
+            description: "True if the LEI or source candidate ID appears in the sanctions source identifiers."
+            tests:
+              - not_null
+
+          - name: is_primary_name_match
+            description: "True if the matched sanctions name is a primary_name record."
+            tests:
+              - not_null
+
+          - name: is_alias_name_match
+            description: "True if the matched sanctions name is an alias_name or name_alias record."
+            tests:
+              - not_null
+
+          - name: source_load_date
+            description: "Greatest source load date across entity, sanctions name and sanctions subject layers."
+            tests:
+              - not_null
+
+          - name: entity_source_load_date
+            description: "Source load date of the matched entity candidate."
+
+          - name: sanctions_name_source_load_date
+            description: "Source load date of the matched sanctions name."
+
+          - name: subject_source_load_date
+            description: "Source load date of the matched sanctioned subject or target."
+
+          - name: entity_source_object_key
+            description: "Source object key of the matched entity candidate."
+
+          - name: sanctions_name_source_object_key
+            description: "Source object key of the matched sanctions name."
+
+          - name: subject_source_object_key
+            description: "Source object key of the matched sanctions subject or target."
+
+          - name: subject_metadata_object_key
+            description: "Metadata object key of the matched sanctions subject or target."
+
+          - name: entity_raw_id
+            description: "Raw source row identifier of the matched entity candidate."
+
+          - name: sanctions_name_raw_id
+            description: "Raw source row identifier of the matched sanctions name."
+
+          - name: subject_raw_id
+            description: "Raw source row identifier of the matched sanctions subject or target."
+
+          - name: entity_row_hash
+            description: "Row hash of the matched entity candidate."
+
+          - name: sanctions_name_row_hash
+            description: "Row hash of the matched sanctions name."
+
+          - name: subject_row_hash
+            description: "Row hash of the matched sanctions subject or target."
+
+          - name: intermediate_loaded_at
+            description: "Timestamp when the intermediate match model was built."
+            tests:
+              - not_null
