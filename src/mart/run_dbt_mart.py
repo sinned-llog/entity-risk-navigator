@@ -30,6 +30,13 @@ MART_MODELS = [
             "source": "audit.job_runs",
             "job_type": "mart",
     },
+    {
+        "model_name": "mart_ecb_macro_context",
+        "target_table": "marts.mart_ecb_macro_context",
+        "is_view": False,
+        "source": "staging.stg_ecb_observations_full",
+        "job_type": "mart",
+    },
 ]
 
 

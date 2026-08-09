@@ -47,6 +47,24 @@ services:
       - postgres
     command: sh -c "pip install --no-cache-dir -r requirements.txt && tail -f /dev/null"
 
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: entity_risk_dashboard
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - ./streamlit_app:/app/streamlit_app
+    ports:
+      - "8501:8501"
+    networks:
+      - entity_risk_network
+    depends_on:
+      - postgres
+
 volumes:
   postgres_data:  
   minio_data:

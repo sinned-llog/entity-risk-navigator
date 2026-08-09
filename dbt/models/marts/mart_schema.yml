@@ -610,3 +610,117 @@ models:
         description: "Timestamp when the audit status mart was built."
         tests:
           - not_null
+
+  - name: mart_ecb_macro_context
+    description: "Dashboard-ready ECB macro context mart with one row per ECB macro indicator series. The table provides latest available observations and simple change metrics for contextual dashboard display. It is not used as a direct driver of the entity risk score."
+
+    columns:
+      - name: ecb_macro_context_id
+        description: "Deterministic unique identifier for the ECB macro context series."
+        tests:
+          - not_null
+          - unique
+
+      - name: indicator_code
+        description: "Stable dashboard-friendly indicator code."
+        tests:
+          - not_null
+          - unique
+
+      - name: display_order
+        description: "Numeric display order for dashboard cards."
+        tests:
+          - not_null
+
+      - name: indicator_name
+        description: "Human-readable ECB indicator name."
+        tests:
+          - not_null
+
+      - name: dataset_code
+        description: "ECB dataset code, e.g. EST, MIR or YC."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['EST', 'MIR', 'YC']
+
+      - name: dataflow
+        description: "ECB dataflow identifier."
+
+      - name: ecb_key_full
+        description: "Full ECB key including the dataset code."
+
+      - name: series_key
+        description: "ECB series key without the dataset prefix."
+        tests:
+          - not_null
+
+      - name: reference_area
+        description: "ECB reference area code. In the current dataset this is mainly U2 for the euro area."
+        tests:
+          - not_null
+
+      - name: reference_area_name
+        description: "Human-readable reference area name."
+
+      - name: frequency
+        description: "Observation frequency, e.g. B for business daily or M for monthly."
+        tests:
+          - not_null
+
+      - name: unit
+        description: "Measurement unit of the ECB observation."
+        tests:
+          - not_null
+
+      - name: first_obs_date
+        description: "First available observation date for the series."
+        tests:
+          - not_null
+
+      - name: latest_obs_date
+        description: "Latest available observation date for the series."
+        tests:
+          - not_null
+
+      - name: latest_time_period
+        description: "Latest ECB time period as provided by the source."
+
+      - name: latest_obs_value
+        description: "Latest available numeric observation value."
+        tests:
+          - not_null
+
+      - name: latest_obs_status
+        description: "Observation status of the latest value."
+
+      - name: previous_obs_date
+        description: "Previous available observation date for the same series."
+
+      - name: previous_obs_value
+        description: "Previous available numeric observation value for the same series."
+
+      - name: latest_change_abs
+        description: "Absolute change between latest and previous observation."
+
+      - name: latest_change_pct
+        description: "Relative change between latest and previous observation."
+
+      - name: observation_count
+        description: "Number of observations available for the series."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Source load date of the ECB staging data."
+        tests:
+          - not_null
+
+      - name: source_url
+        description: "ECB API URL used for the source extraction."
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart was built."
+        tests:
+          - not_null
