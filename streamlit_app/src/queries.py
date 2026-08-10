@@ -2,6 +2,11 @@
 
 from src.db import read_sql
 from unidecode import unidecode
+import pandas as pd
+
+############################################################################
+#Overview Queries
+############################################################################
 
 
 def to_latin_display(value: object) -> str:
@@ -78,12 +83,10 @@ def get_risk_tier_distribution():
     """
     return read_sql(query)
 
-
 def get_top_risk_entities(limit: int = 25):
     query = """
         select
             lei,
-            legal_name,
             legal_name_normalized,
             country,
             entity_status,
@@ -94,17 +97,192 @@ def get_top_risk_entities(limit: int = 25):
             high_confidence_match_count,
             medium_confidence_match_count,
             review_required_match_count,
-            sanctions_sources,
-            sanctions_programs,
-            sanctions_lists,
-            risk_reasons
+            source_entity_keys
         from marts.mart_entity_risk_score
+        where risk_tier <> 'low_or_no_known_match'
         order by
             risk_score desc,
             total_sanctions_match_count desc,
             legal_name_normalized asc
         limit :limit
     """
+
     df = read_sql(query, params={"limit": limit})
+    return add_latin_display_columns(df)
+
+############################################################################
+#Entity_Detail Queries
+############################################################################
+
+def search_entities(search_term: str, limit: int = 50):
+    query = """
+        select
+            m.entity_candidate_id,
+            m.lei,
+            m.legal_name_normalized,
+            m.country,
+            m.entity_status,
+            m.registration_status,
+            m.legal_jurisdiction,
+
+            coalesce(r.risk_score, 0) as risk_score,
+            coalesce(r.risk_tier, 'low_or_no_known_match') as risk_tier,
+            coalesce(r.total_sanctions_match_count, 0) as total_sanctions_match_count,
+            coalesce(r.high_confidence_match_count, 0) as high_confidence_match_count,
+            coalesce(r.medium_confidence_match_count, 0) as medium_confidence_match_count,
+            coalesce(r.review_required_match_count, 0) as review_required_match_count
+
+        from marts.mart_entity_master m
+        left join marts.mart_entity_risk_score r
+            on m.entity_candidate_id = r.entity_candidate_id
+
+        where
+            :search_term is not null
+            and length(trim(:search_term)) >= 2
+            and (
+                m.lei ilike '%' || :search_term || '%'
+                or m.legal_name ilike '%' || :search_term || '%'
+                or m.legal_name_normalized ilike '%' || :search_term || '%'
+            )
+
+        order by
+            case
+                when m.lei ilike :search_term || '%' then 1
+                when m.legal_name_normalized ilike :search_term || '%' then 2
+                when m.legal_name ilike :search_term || '%' then 3
+                else 4
+            end,
+            coalesce(r.risk_score, 0) desc,
+            coalesce(r.total_sanctions_match_count, 0) desc,
+            m.legal_name_normalized asc
+
+        limit :limit
+    """
+
+    df = read_sql(
+        query,
+        params={
+            "search_term": search_term.strip(),
+            "limit": limit,
+        },
+    )
+    return add_latin_display_columns(df)
+
+def get_entity_detail_summary(entity_candidate_id: str):
+    query = """
+        select
+            m.entity_candidate_id,
+            m.candidate_source,
+            m.candidate_source_id,
+            m.lei,
+            m.legal_name_normalized,
+            m.country,
+            m.entity_status,
+            m.registration_status,
+            m.legal_jurisdiction,
+            m.legal_address_country,
+            m.headquarters_address_country,
+
+            m.direct_parent_lei,
+            m.direct_parent_name,
+            m.ultimate_parent_lei,
+            m.ultimate_parent_name,
+            m.has_direct_parent,
+            m.has_ultimate_parent,
+            m.has_any_parent,
+
+            m.next_renewal_date,
+            m.last_update_date,
+            m.source_load_date,
+
+            coalesce(r.risk_score, 0) as risk_score,
+            coalesce(r.risk_tier, 'low_or_no_known_match') as risk_tier,
+            r.risk_reasons,
+            r.match_tier_summary,
+            coalesce(r.total_sanctions_match_count, 0) as total_sanctions_match_count,
+            coalesce(r.high_confidence_match_count, 0) as high_confidence_match_count,
+            coalesce(r.medium_confidence_match_count, 0) as medium_confidence_match_count,
+            coalesce(r.review_required_match_count, 0) as review_required_match_count,
+            r.source_entity_keys,
+            r.sanctions_sources,
+            r.distinct_sanction_subject_count,
+            r.mart_loaded_at as risk_mart_loaded_at
+
+        from marts.mart_entity_master m
+        left join marts.mart_entity_risk_score r
+            on m.entity_candidate_id = r.entity_candidate_id
+
+        where m.entity_candidate_id = :entity_candidate_id
+
+        limit 1
+    """
+
+    df = read_sql(
+            query,
+            params={
+                "entity_candidate_id": entity_candidate_id,
+            },
+        )
+    return add_latin_display_columns(df)
+
+def get_entity_sanctions_matches(entity_candidate_id: str):
+    query = """
+        select
+            entity_sanctions_match_id,
+            entity_candidate_id,
+            lei,
+            legal_name,
+            legal_name_normalized,
+            country,
+
+            sanctions_source,
+            sanctions_entity_type,
+            sanction_subject_id,
+            source_subject_id,
+            source_entity_key,
+            sanctions_name,
+            sanctions_subject_primary_name,
+            source_name_type,
+            is_primary_name,
+
+            match_type,
+            match_score,
+            match_quality_score,
+            match_quality_tier,
+            match_quality_reasons,
+            match_quality_rank,
+
+            is_potential_risk_match,
+            is_high_confidence_match,
+            is_medium_confidence_match,
+            is_review_required_match,
+            is_short_match_key,
+            is_generic_match_key,
+            has_country_overlap,
+            country_overlap_status,
+            has_identifier_overlap,
+
+            sanction_context_summary,
+            source_programs,
+            source_lists,
+            source_countries,
+            source_reference_url,
+            source_load_date
+
+        from marts.mart_entity_sanctions_screening
+
+        where entity_candidate_id = :entity_candidate_id
+
+        order by
+            match_quality_rank asc,
+            match_quality_score desc,
+            sanctions_source asc,
+            sanctions_name asc
+    """
+
+    df = read_sql(
+        query,
+        params={"entity_candidate_id": entity_candidate_id},
+    )
 
     return add_latin_display_columns(df)

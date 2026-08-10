@@ -94,6 +94,14 @@ sanctions_summary as (
               and trim(source_lists) <> ''
         ) as sanctions_lists,
 
+        string_agg(
+            distinct source_entity_key,
+            ';' order by source_entity_key
+        ) filter (
+            where source_entity_key is not null
+            and trim(source_entity_key) <> ''
+        ) as source_entity_keys,
+
         max(match_quality_score) as max_match_quality_score,
 
         min(match_quality_rank) as best_match_quality_rank,
@@ -113,6 +121,7 @@ risk_scoring as (
         e.entity_candidate_id,
         e.candidate_source,
         e.candidate_source_id,
+
 
         e.lei,
         e.legal_name,
@@ -150,6 +159,8 @@ risk_scoring as (
 
         s.max_match_quality_score,
         s.best_match_quality_rank,
+
+        s.source_entity_keys,
 
         case
             when coalesce(s.total_sanctions_match_count, 0) > 0 then true
@@ -191,34 +202,31 @@ risk_scoring as (
             else 'low_or_no_known_match'
         end as risk_tier,
 
-        concat_ws(
-            '; ',
-            case
-                when coalesce(s.high_confidence_match_count, 0) > 0
-                    then 'high_confidence_sanctions_match'
-            end,
-            case
-                when coalesce(s.medium_confidence_match_count, 0) > 0
-                    then 'medium_confidence_sanctions_match'
-            end,
-            case
-                when coalesce(s.review_required_match_count, 0) > 0
-                    then 'review_required_sanctions_match'
-            end,
-            case
-                when coalesce(s.total_sanctions_match_count, 0) = 0
-                    then 'no_known_sanctions_match'
-            end,
-            case
-                when e.has_any_parent = true
-                    then 'parent_relationship_available'
-            end
-        ) as risk_reasons,
+        case
+            when coalesce(s.high_confidence_match_count, 0) > 0
+                then 'highest_risk_reason=high_confidence_sanctions_match'
+
+            when coalesce(s.medium_confidence_match_count, 0) > 0
+                then 'highest_risk_reason=medium_confidence_sanctions_match'
+
+            when coalesce(s.review_required_match_count, 0) > 0
+                then 'highest_risk_reason=review_required_sanctions_match'
+
+            else 'highest_risk_reason=no_known_sanctions_match'
+        end as risk_reasons,
 
         greatest(
             e.entity_source_load_date,
             coalesce(s.sanctions_source_load_date, e.entity_source_load_date)
-        ) as source_load_date
+        ) as source_load_date,
+
+        concat_ws(
+            '; ',
+            'total_matches=' || coalesce(s.total_sanctions_match_count, 0)::text,
+            'high=' || coalesce(s.high_confidence_match_count, 0)::text,
+            'medium=' || coalesce(s.medium_confidence_match_count, 0)::text,
+            'review=' || coalesce(s.review_required_match_count, 0)::text
+        ) as match_tier_summary
 
     from entity_master e
 
@@ -259,6 +267,7 @@ final as (
         high_confidence_match_count,
         medium_confidence_match_count,
         review_required_match_count,
+        source_entity_keys,
 
         sanctions_source_count,
         distinct_sanction_subject_count,
@@ -279,6 +288,7 @@ final as (
         risk_score,
         risk_tier,
         risk_reasons,
+        match_tier_summary,
 
         source_load_date,
         current_timestamp as mart_loaded_at

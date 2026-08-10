@@ -71,13 +71,53 @@ try:
 
     st.subheader("Top Risk Entities")
 
-    top_entities_df = get_top_risk_entities(limit=25)
+    df = get_top_risk_entities(limit=25)
 
-    st.dataframe(
-        top_entities_df,
-        use_container_width=True,
-        hide_index=True,
-    )
+    display_columns = [
+        "lei",
+        "legal_name_normalized_latin_display",
+        "legal_name_normalized",
+        "country",
+        "entity_status",
+        "registration_status",
+        "risk_score",
+        "risk_tier",
+        "total_sanctions_match_count",
+        "high_confidence_match_count",
+        "medium_confidence_match_count",
+        "review_required_match_count",
+        "source_entity_keys",
+    ]
+
+    missing_columns = [
+    column for column in display_columns if column not in df.columns
+    ]
+    
+    if missing_columns:
+        st.warning(
+            "Some expected columns are missing from the query result: "
+            + ", ".join(missing_columns)
+        )
+        st.dataframe(df, use_container_width=True)
+    else:
+        df_display = df[display_columns].rename(
+            columns={
+                "lei": "LEI",
+                "legal_name_normalized_latin_display": "Legal name, Latin",
+                "legal_name_normalized": "Legal name, original normalized",
+                "country": "Country",
+                "entity_status": "Entity status",
+                "registration_status": "Registration status",
+                "risk_score": "Risk score",
+                "risk_tier": "Risk tier",
+                "total_sanctions_match_count": "Total matches",
+                "high_confidence_match_count": "High",
+                "medium_confidence_match_count": "Medium",
+                "review_required_match_count": "Review",
+                "source_entity_keys": "Source entity keys",
+            }
+        )
+        st.dataframe(df_display, use_container_width=True)
 
 except Exception as exc:
     st.error("Failed to load overview data.")

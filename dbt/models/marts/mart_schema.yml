@@ -479,7 +479,7 @@ models:
                 values: ['high', 'medium', 'review', 'low_or_no_known_match']
 
       - name: risk_reasons
-        description: "Semicolon-separated reasons explaining the risk tier."
+        description: "Primary reason explaining the final entity-level risk tier based on the highest available sanctions match quality."
 
       - name: source_load_date
         description: "Latest source load date across the entity and sanctions screening inputs."
@@ -490,6 +490,12 @@ models:
         description: "Timestamp when the mart was built."
         tests:
           - not_null
+  
+      - name: source_entity_keys
+        description: "Semicolon-separated list of source-level sanctioned subject or target identifiers matched for the entity."
+
+      - name: match_tier_summary
+        description: "Compact summary of sanctions match counts by quality tier, e.g. total_matches=3; high=1; medium=1; review=1."
 
   - name: mart_pipeline_audit_status
     description: "Dashboard-ready pipeline audit status mart with one row per latest job and target table combination."
