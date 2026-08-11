@@ -10,3 +10,17 @@ models:
   entity_risk_navigator:
     staging:
       +materialized: table
+
+seeds:
+  entity_risk_navigator:
+    pipeline_expected_tables:
+      +schema: config
+      +quote_columns: false
+      +column_types:
+        pipeline_layer: text
+        target_table: text
+        display_name: text
+        is_active: boolean
+        is_required_for_mvp: boolean
+        sort_order: integer
+        notes: text

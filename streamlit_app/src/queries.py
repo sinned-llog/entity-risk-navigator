@@ -286,3 +286,248 @@ def get_entity_sanctions_matches(entity_candidate_id: str):
     )
 
     return add_latin_display_columns(df)
+
+############################################################################
+# Pipeline Status Queries
+############################################################################
+
+def get_pipeline_table_status_metrics():
+    query = """
+        with expected_tables as (
+            select
+                pipeline_layer,
+                target_table,
+                display_name,
+                is_active,
+                is_required_for_mvp,
+                sort_order
+            from config.pipeline_expected_tables
+            where is_active = true
+        ),
+
+        latest_audit as (
+            select
+                a.*,
+                row_number() over (
+                    partition by a.target_table
+                    order by
+                        case a.pipeline_health_status
+                            when 'not_healthy' then 1
+                            when 'latest_failed_previous_success_available' then 2
+                            when 'healthy' then 3
+                            else 4
+                        end asc,
+                        a.is_failed_or_incomplete_latest_run desc,
+                        a.started_at desc nulls last,
+                        a.job_run_id desc nulls last
+                ) as row_num
+            from marts.mart_pipeline_audit_status a
+        ),
+
+        table_status as (
+            select
+                e.pipeline_layer,
+                e.target_table,
+                e.display_name,
+                coalesce(a.pipeline_health_status, 'missing_run') as pipeline_health_status,
+                coalesce(a.total_run_count, 0) as total_run_count,
+                coalesce(a.is_successful_latest_run, false) as is_successful_latest_run,
+                coalesce(a.is_failed_or_incomplete_latest_run, false) as is_failed_or_incomplete_latest_run
+            from expected_tables e
+            left join latest_audit a
+                on e.target_table = a.target_table
+               and a.row_num = 1
+        )
+
+        select
+            count(*) as monitored_tables,
+            coalesce(sum(total_run_count), 0) as total_runs,
+            count(*) filter (
+                where pipeline_health_status = 'healthy'
+            ) as healthy_tables,
+            count(*) filter (
+                where pipeline_health_status = 'latest_failed_previous_success_available'
+            ) as warning_tables,
+            count(*) filter (
+                where pipeline_health_status = 'not_healthy'
+            ) as not_healthy_tables,
+            count(*) filter (
+                where pipeline_health_status = 'missing_run'
+            ) as missing_run_tables,
+            count(*) filter (
+                where is_failed_or_incomplete_latest_run
+            ) as tables_with_failed_latest_run
+        from table_status
+    """
+    return read_sql(query)
+
+
+def get_pipeline_table_health_details():
+    query = """
+        with expected_tables as (
+            select
+                pipeline_layer,
+                target_table,
+                display_name,
+                is_active,
+                is_required_for_mvp,
+                sort_order
+            from config.pipeline_expected_tables
+            where is_active = true
+        ),
+
+        latest_audit as (
+            select
+                a.*,
+                row_number() over (
+                    partition by a.target_table
+                    order by
+                        case a.pipeline_health_status
+                            when 'not_healthy' then 1
+                            when 'latest_failed_previous_success_available' then 2
+                            when 'healthy' then 3
+                            else 4
+                        end asc,
+                        a.is_failed_or_incomplete_latest_run desc,
+                        a.started_at desc nulls last,
+                        a.job_run_id desc nulls last
+                ) as row_num
+            from marts.mart_pipeline_audit_status a
+        )
+
+        select
+            e.pipeline_layer,
+            e.target_table,
+            e.display_name,
+            e.sort_order,
+
+            a.job_name,
+            a.job_type,
+            a.source,
+            a.target_system,
+            a.app_env,
+            a.status,
+
+            coalesce(a.pipeline_health_status, 'missing_run') as pipeline_health_status,
+            coalesce(a.is_successful_latest_run, false) as is_successful_latest_run,
+            coalesce(a.is_failed_or_incomplete_latest_run, false) as is_failed_or_incomplete_latest_run,
+
+            coalesce(a.total_run_count, 0) as total_run_count,
+            coalesce(a.success_run_count, 0) as success_run_count,
+            coalesce(a.failed_or_incomplete_run_count, 0) as failed_or_incomplete_run_count,
+
+            a.rows_read,
+            a.rows_inserted,
+            a.started_at,
+            a.finished_at,
+            a.duration_seconds,
+            a.last_success_at,
+            a.last_failure_at,
+            a.effective_load_date,
+            a.error_message,
+            a.mart_loaded_at
+
+        from expected_tables e
+        left join latest_audit a
+            on e.target_table = a.target_table
+           and a.row_num = 1
+
+        order by
+            case coalesce(a.pipeline_health_status, 'missing_run')
+                when 'not_healthy' then 1
+                when 'missing_run' then 2
+                when 'latest_failed_previous_success_available' then 3
+                when 'healthy' then 4
+                else 5
+            end,
+            coalesce(a.is_failed_or_incomplete_latest_run, false) desc,
+            e.sort_order asc,
+            e.pipeline_layer asc,
+            e.target_table asc
+    """
+    return read_sql(query)
+
+
+def get_pipeline_latest_loads():
+    query = """
+        select
+            a.job_name,
+            a.job_type,
+            a.source,
+            a.target_system,
+            a.target_table,
+            e.display_name,
+            e.pipeline_layer,
+            a.app_env,
+            a.status,
+            a.pipeline_health_status,
+            a.is_successful_latest_run,
+            a.is_failed_or_incomplete_latest_run,
+            a.started_at,
+            a.finished_at,
+            a.duration_seconds,
+            a.effective_load_date,
+            a.rows_read,
+            a.rows_inserted,
+            a.total_run_count,
+            a.success_run_count,
+            a.failed_or_incomplete_run_count,
+            a.last_success_at,
+            a.last_failure_at,
+            a.has_successful_run,
+            a.error_message,
+            a.mart_loaded_at
+        from marts.mart_pipeline_audit_status a
+        inner join config.pipeline_expected_tables e
+            on a.target_table = e.target_table
+           and e.is_active = true
+        order by
+            case a.pipeline_health_status
+                when 'not_healthy' then 1
+                when 'latest_failed_previous_success_available' then 2
+                when 'healthy' then 3
+                else 4
+            end,
+            a.is_failed_or_incomplete_latest_run desc,
+            a.started_at desc nulls last,
+            e.sort_order asc,
+            a.job_name asc
+    """
+    return read_sql(query)
+
+    ############################################################################
+# Macro Context Queries
+############################################################################
+
+def get_ecb_macro_context():
+    query = """
+        select
+            ecb_macro_context_id,
+            indicator_code,
+            display_order,
+            indicator_name,
+            dataset_code,
+            dataflow,
+            reference_area,
+            reference_area_name,
+            frequency,
+            unit,
+            first_obs_date,
+            latest_obs_date,
+            latest_time_period,
+            latest_obs_value,
+            latest_obs_status,
+            previous_obs_date,
+            previous_obs_value,
+            latest_change_abs,
+            latest_change_pct,
+            observation_count,
+            source_load_date,
+            source_url,
+            mart_loaded_at
+        from marts.mart_ecb_macro_context
+        order by
+            display_order asc,
+            indicator_name asc
+    """
+    return read_sql(query)

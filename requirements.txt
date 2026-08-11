@@ -3,3 +3,5 @@ boto3
 python-dotenv
 psycopg2-binary
 dbt-postgres>=1.7.0
+Unidecode
+pandas

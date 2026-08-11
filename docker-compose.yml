@@ -32,7 +32,9 @@ services:
       - entity_risk_network
   
   ingestion:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.ingestion
     container_name: entity_risk_ingestion
     restart: "no"
     working_dir: /app
