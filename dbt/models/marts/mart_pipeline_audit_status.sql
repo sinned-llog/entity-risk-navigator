@@ -132,9 +132,9 @@ final as (
         l.rows_read,
         l.rows_inserted,
 
-        h.total_run_count,
-        h.success_run_count,
-        h.failed_or_incomplete_run_count,
+        coalesce(h.total_run_count, 0) as total_run_count,
+        coalesce(h.success_run_count, 0) as success_run_count,
+        coalesce(h.failed_or_incomplete_run_count, 0) as failed_or_incomplete_run_count,
 
         h.last_success_at,
         h.last_failure_at,

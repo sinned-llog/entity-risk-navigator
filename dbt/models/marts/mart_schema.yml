@@ -498,7 +498,8 @@ models:
         description: "Compact summary of sanctions match counts by quality tier, e.g. total_matches=3; high=1; medium=1; review=1."
 
   - name: mart_pipeline_audit_status
-    description: "Dashboard-ready pipeline audit status mart with one row per latest job and target table combination."
+    description:
+      "Dashboard-ready pipeline audit status mart with one row per latest job and target table combination where applicable. Source download jobs that write to MinIO may not have a target_table."
 
     columns:
       - name: job_run_id
@@ -523,9 +524,7 @@ models:
         description: "Target system of the job, usually postgres."
 
       - name: target_table
-        description: "Target table written or represented by the job."
-        tests:
-          - not_null
+        description: "Target Postgres table written or represented by the job where applicable. This may be null for source download jobs that write raw files to MinIO."
 
       - name: app_env
         description: "Application environment, e.g. dev."

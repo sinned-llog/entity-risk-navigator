@@ -2,28 +2,43 @@
 
 set -euo pipefail
 
-DBT_DIR="/app/dbt"
-PROFILES_DIR="/app/dbt"
+echo "============================================================"
+echo " EntityRisk Navigator - Audited dbt Pipeline Run"
+echo "============================================================"
 
-echo "Starting required services..."
+echo ""
+echo "[1/8] Starting required services..."
 docker compose up -d postgres minio ingestion dashboard
 
-echo "Running dbt seed..."
-docker compose exec ingestion sh -c "cd ${DBT_DIR} && dbt seed --select pipeline_expected_tables --profiles-dir ${PROFILES_DIR}"
+echo ""
+echo "[2/8] Running dbt seed: pipeline_expected_tables..."
+docker compose exec ingestion sh -c "cd /app/dbt && dbt seed --select pipeline_expected_tables --profiles-dir /app/dbt"
 
-echo "Running staging models..."
-docker compose exec ingestion sh -c "cd ${DBT_DIR} && dbt run --select path:models/staging --profiles-dir ${PROFILES_DIR}"
+echo ""
+echo "[3/8] Running staging models through audited runner..."
+docker compose exec ingestion python -m staging.run_dbt_staging
 
-echo "Running staging_int models..."
-docker compose exec ingestion sh -c "cd ${DBT_DIR} && dbt run --select path:models/staging_int --profiles-dir ${PROFILES_DIR}"
+echo ""
+echo "[4/8] Running staging_int models through audited runner..."
+docker compose exec ingestion python -m staging_int.run_dbt_staging_int_full
 
-echo "Running mart models..."
-docker compose exec ingestion sh -c "cd ${DBT_DIR} && dbt run --select path:models/marts --profiles-dir ${PROFILES_DIR}"
+echo ""
+echo "[5/8] Running mart models through audited runner..."
+docker compose exec ingestion python -m mart.run_dbt_mart
 
-echo "Running dbt tests..."
-docker compose exec ingestion sh -c "cd ${DBT_DIR} && dbt test --profiles-dir ${PROFILES_DIR}"
+echo ""
+echo "[6/8] Running dbt tests..."
+docker compose exec ingestion sh -c "cd /app/dbt && dbt test --profiles-dir /app/dbt"
 
-echo "Restarting dashboard..."
+echo ""
+echo "[7/8] Refreshing pipeline audit status mart..."
+docker compose exec ingestion python -m mart.run_dbt_mart
+
+echo ""
+echo "[8/8] Restarting Streamlit dashboard..."
 docker restart entity_risk_dashboard
 
-echo "Pipeline completed."
+echo ""
+echo "============================================================"
+echo " Audited dbt pipeline completed successfully."
+echo "============================================================"
