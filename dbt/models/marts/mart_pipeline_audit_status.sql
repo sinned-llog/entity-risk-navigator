@@ -8,7 +8,8 @@
       "CREATE INDEX IF NOT EXISTS idx_mart_pipeline_audit_status_job_type ON {{ this }} (job_type);",
       "CREATE INDEX IF NOT EXISTS idx_mart_pipeline_audit_status_target_table ON {{ this }} (target_table);",
       "CREATE INDEX IF NOT EXISTS idx_mart_pipeline_audit_status_started_at ON {{ this }} (started_at);",
-      "CREATE INDEX IF NOT EXISTS idx_mart_pipeline_audit_status_finished_at ON {{ this }} (finished_at);"
+      "CREATE INDEX IF NOT EXISTS idx_mart_pipeline_audit_status_finished_at ON {{ this }} (finished_at);",
+      "CREATE INDEX IF NOT EXISTS idx_mart_pipeline_audit_status_freshness ON {{ this }} (freshness_status);"
     ]
 ) }}
 
@@ -36,6 +37,9 @@ with audit_runs as (
         end as duration_seconds,
 
         effective_load_date,
+
+        coalesce(freshness_status, 'unknown') as freshness_status,
+        snapshot_age_days,
 
         coalesce(rows_read, 0) as rows_read,
         coalesce(rows_inserted, 0) as rows_inserted,
@@ -74,19 +78,19 @@ run_history as (
         count(*) as total_run_count,
 
         count(*) filter (
-            where status = 'success'
+            where status in ('success', 'success_with_warnings')
         ) as success_run_count,
 
         count(*) filter (
-            where status <> 'success'
+            where status not in ('success', 'success_with_warnings')
         ) as failed_or_incomplete_run_count,
 
         max(finished_at) filter (
-            where status = 'success'
+            where status in ('success', 'success_with_warnings')
         ) as last_success_at,
 
         max(finished_at) filter (
-            where status <> 'success'
+            where status not in ('success', 'success_with_warnings')
         ) as last_failure_at,
 
         max(started_at) as last_started_at,
@@ -114,12 +118,12 @@ final as (
         l.status,
 
         case
-            when l.status = 'success' then true
+            when l.status in ('success', 'success_with_warnings') then true
             else false
         end as is_successful_latest_run,
 
         case
-            when l.status <> 'success' then true
+            when l.status not in ('success', 'success_with_warnings') then true
             else false
         end as is_failed_or_incomplete_latest_run,
 
@@ -128,6 +132,9 @@ final as (
         l.duration_seconds,
 
         l.effective_load_date,
+
+        l.freshness_status,
+        l.snapshot_age_days,
 
         l.rows_read,
         l.rows_inserted,
@@ -145,8 +152,8 @@ final as (
         end as has_successful_run,
 
         case
-            when l.status = 'success' then 'healthy'
-            when l.status <> 'success'
+            when l.status in ('success', 'success_with_warnings') then 'healthy'
+            when l.status not in ('success', 'success_with_warnings')
              and h.last_success_at is not null then 'latest_failed_previous_success_available'
             else 'not_healthy'
         end as pipeline_health_status,
@@ -160,7 +167,10 @@ final as (
 
     left join run_history h
         on l.job_name = h.job_name
-       and l.target_table = h.target_table
+       and (
+            l.target_table = h.target_table
+            or (l.target_table is null and h.target_table is null)
+       )
 
     where l.latest_run_rank = 1
 

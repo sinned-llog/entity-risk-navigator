@@ -1,0 +1,30 @@
+pipeline_layer,target_table,display_name,is_active,is_required_for_mvp,sort_order,notes
+marts,marts.mart_entity_master,Entity master,true,true,10,Core dashboard entity master
+marts,marts.mart_entity_risk_score,Entity risk score,true,true,20,Aggregated entity risk score
+marts,marts.mart_entity_sanctions_screening,Entity sanctions screening,true,true,30,Match level sanctions screening detail
+marts,marts.mart_pipeline_audit_status,Pipeline audit status,true,true,40,Dashboard pipeline audit status
+marts,marts.mart_ecb_macro_context,ECB macro context,true,true,50,Dashboard only macro context
+marts,marts.mart_marts.mart_entity_relationship_edges,Entity relationship edges,true,true,60,Direct and ultimate parent organization
+marts,marts.mart_entity_parent_path,parent path information,true,true,70,Child and Parent information to entities
+marts,marts.mart_entity_relationship_context,Dashboard ready relationship information,true,true,80,Dashboard relationship information
+
+staging,staging.stg_bafin_pages_full,BaFin pages full,false,false,100,Deferred BaFin staging table not active in current MVP
+staging,staging.stg_ecb_observations_full,ECB observations full,true,true,110,ECB staging observations for dashboard macro context
+staging,staging.stg_eu_fsf_full,EU FSF full,true,true,120,Full EU Financial Sanctions Files staging table
+staging,staging.stg_gleif_lei_full,GLEIF LEI full,true,true,130,Full GLEIF LEI staging table
+staging,staging.stg_gleif_rr_full,GLEIF relationship records full,true,true,140,Full GLEIF relationship records staging table
+staging,staging.stg_opensanctions,OpenSanctions staging,true,true,150,OpenSanctions staging table
+staging,staging.stg_int_entity_sanctions_matches,Entity sanctions matches,true,true,210,Exact entity to sanctions match layer
+staging,staging.stg_int_eu_fsf_names,EU FSF names,true,true,220,EU FSF names and aliases
+staging,staging.stg_int_eu_fsf_subjects,EU FSF subjects,true,true,230,EU FSF sanctioned subject context
+staging,staging.stg_int_gleif_parent_summary,GLEIF parent summary,true,true,240,GLEIF parent relationship summary
+staging,staging.stg_int_opensanctions_names,OpenSanctions names,true,true,250,OpenSanctions names and aliases
+staging,staging.stg_int_opensanctions_targets,OpenSanctions targets,true,true,260,OpenSanctions target context
+staging,staging.stg_int_sanctions_names_unified,Unified sanctions names,true,true,270,Unified sanctions names and aliases
+staging,staging.stg_int_sanctions_subjects_unified,Unified sanctions subjects,true,true,280,Unified EU FSF and OpenSanctions subjects
+
+raw,raw.gleif_lei_full,GLEIF entities,true,true,310,Raw GLEIF entity source
+raw,raw.gleif_rr_full,GLEIF relationships,true,true,320,Raw GLEIF parent relationship source
+raw,raw.eu_fsf_full,EU FSF,true,true,330,Raw EU Financial Sanctions Files source
+raw,raw.opensanctions_targets,OpenSanctions,true,true,340,Raw OpenSanctions source
+raw,raw.ecb_observations_full,ECB observations,true,true,350,Raw ECB observations source

@@ -7,6 +7,10 @@ from src.queries import (
     search_entities,
     get_entity_detail_summary,
     get_entity_sanctions_matches,
+    get_entity_relationship_context,
+    get_entity_child_entities,
+    get_entity_same_parent_entities,
+    get_entity_parent_path,
 )
 
 
@@ -144,23 +148,187 @@ def render_master_data(row):
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def render_parent_information(row):
-    parent_data = {
-        "Has Direct Parent": row.get("has_direct_parent"),
-        "Direct Parent LEI": row.get("direct_parent_lei"),
-        "Direct Parent Name": row.get("direct_parent_name"),
-        "Has Ultimate Parent": row.get("has_ultimate_parent"),
-        "Ultimate Parent LEI": row.get("ultimate_parent_lei"),
-        "Ultimate Parent Name": row.get("ultimate_parent_name"),
-        "Has Any Parent": row.get("has_any_parent"),
-    }
+def render_relationship_context(
+    relationship_df,
+    child_entities_df,
+    same_parent_entities_df,
+    parent_path_df,
+):
+    st.subheader("Relationship Context")
 
-    df = pd.DataFrame(
-        [{"Field": key, "Value": value} for key, value in parent_data.items()]
+    if relationship_df.empty:
+        st.info("No relationship context found for this entity.")
+        return
+
+    rel = relationship_df.iloc[0]
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "Parent Chain Depth",
+        format_int(rel.get("parent_chain_depth")),
     )
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    col2.metric(
+        "Known Children / Descendants",
+        format_int(rel.get("total_descendant_count")),
+    )
 
+    col3.metric(
+        "Same-Parent Peers",
+        format_int(rel.get("same_parent_entity_count")),
+    )
+
+    col4.metric(
+        "Has Parent",
+        "Yes" if rel.get("has_any_parent") else "No",
+    )
+
+    summary = rel.get("relationship_context_summary")
+
+    if summary:
+        st.caption(summary)
+
+    st.markdown("#### Parent Overview")
+
+    parent_data = {
+        "Direct Parent LEI": rel.get("direct_parent_lei"),
+        "Direct Parent Name": rel.get("direct_parent_name"),
+        "Ultimate Parent LEI": rel.get("ultimate_parent_lei"),
+        "Ultimate Parent Name": rel.get("ultimate_parent_name"),
+        "Furthest Known Ancestor LEI": rel.get("furthest_known_ancestor_lei"),
+        "Furthest Known Ancestor Name": rel.get("furthest_known_ancestor_name"),
+        "Source Load Date": rel.get("source_load_date"),
+    }
+
+    parent_display = pd.DataFrame(
+        [
+            {"Field": key, "Value": value}
+            for key, value in parent_data.items()
+            if value is not None and str(value).strip() != ""
+        ]
+    )
+
+    if parent_display.empty:
+        st.info("No parent details available.")
+    else:
+        st.dataframe(
+            parent_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not parent_path_df.empty:
+        st.markdown("#### Parent Path")
+
+        parent_path_columns = [
+            "relationship_depth",
+            "ancestor_lei",
+            "ancestor_name",
+            "lei_path_text",
+            "is_furthest_known_ancestor",
+        ]
+
+        existing_parent_path_columns = [
+            column for column in parent_path_columns
+            if column in parent_path_df.columns
+        ]
+
+        parent_path_display = parent_path_df[
+            existing_parent_path_columns
+        ].rename(
+            columns={
+                "relationship_depth": "Depth",
+                "ancestor_lei": "Ancestor LEI",
+                "ancestor_name": "Ancestor Name",
+                "lei_path_text": "LEI Path",
+                "is_furthest_known_ancestor": "Furthest Known Ancestor",
+            }
+        )
+
+        st.dataframe(
+            parent_path_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not child_entities_df.empty:
+        st.markdown("#### Known Child and Descendant Entities")
+
+        child_display_columns = [
+            "relationship_level",
+            "relationship_depth",
+            "lei",
+            "legal_name",
+            "legal_name_normalized",
+            "country",
+            "entity_status",
+            "registration_status",
+            "direct_parent_name",
+            "lei_path_text",
+        ]
+
+        existing_child_columns = [
+            column for column in child_display_columns
+            if column in child_entities_df.columns
+        ]
+
+        child_display = child_entities_df[existing_child_columns].rename(
+            columns={
+                "relationship_level": "Relationship Level",
+                "relationship_depth": "Depth",
+                "lei": "LEI",
+                "legal_name": "Legal Name",
+                "legal_name_normalized": "Normalized Name",
+                "country": "Country",
+                "entity_status": "Entity Status",
+                "registration_status": "Registration Status",
+                "direct_parent_name": "Direct Parent",
+                "lei_path_text": "Relationship Path",
+            }
+        )
+
+        st.dataframe(
+            child_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not same_parent_entities_df.empty:
+        st.markdown("#### Same-Parent Entities")
+
+        peer_display_columns = [
+            "lei",
+            "legal_name",
+            "legal_name_normalized",
+            "country",
+            "entity_status",
+            "registration_status",
+            "direct_parent_name",
+        ]
+
+        existing_peer_columns = [
+            column for column in peer_display_columns
+            if column in same_parent_entities_df.columns
+        ]
+
+        peer_display = same_parent_entities_df[existing_peer_columns].rename(
+            columns={
+                "lei": "LEI",
+                "legal_name": "Legal Name",
+                "legal_name_normalized": "Normalized Name",
+                "country": "Country",
+                "entity_status": "Entity Status",
+                "registration_status": "Registration Status",
+                "direct_parent_name": "Shared Direct Parent",
+            }
+        )
+
+        st.dataframe(
+            peer_display,
+            use_container_width=True,
+            hide_index=True,
+        )
 
 try:
     search_term = st.text_input(
@@ -172,7 +340,7 @@ try:
         st.info("Enter at least 2 characters to search for an entity.")
         st.stop()
 
-    results_df = search_entities(search_term=search_term, limit=50)
+    results_df = search_entities(search_term=search_term, limit=1000)
 
     if results_df.empty:
         st.warning("No entities found.")
@@ -215,6 +383,36 @@ try:
     matches_df = get_entity_sanctions_matches(
         entity_candidate_id=selected_entity_candidate_id
     )
+    relationship_df = get_entity_relationship_context(
+    entity_candidate_id=selected_entity_candidate_id
+    )
+
+    child_entities_df = pd.DataFrame()
+    same_parent_entities_df = pd.DataFrame()
+    parent_path_df = pd.DataFrame()
+
+    if not relationship_df.empty:
+        relationship_row = relationship_df.iloc[0]
+
+        selected_lei_for_relationships = relationship_row.get("lei")
+        selected_direct_parent_lei = relationship_row.get("direct_parent_lei")
+
+        if selected_lei_for_relationships:
+            child_entities_df = get_entity_child_entities(
+                lei=selected_lei_for_relationships,
+                limit=1000,
+            )
+
+        if selected_direct_parent_lei:
+            same_parent_entities_df = get_entity_same_parent_entities(
+                entity_candidate_id=selected_entity_candidate_id,
+                direct_parent_lei=selected_direct_parent_lei,
+                limit=1000,
+            )
+
+        parent_path_df = get_entity_parent_path(
+            entity_candidate_id=selected_entity_candidate_id
+        )
 
     row = summary_df.iloc[0]
 
@@ -232,11 +430,18 @@ try:
 
     st.divider()
 
+    with st.expander("Relationship Context", expanded=True):
+        render_relationship_context(
+            relationship_df=relationship_df,
+            child_entities_df=child_entities_df,
+            same_parent_entities_df=same_parent_entities_df,
+            parent_path_df=parent_path_df,
+        )
+
+    st.divider()
+
     with st.expander("Master Data", expanded=False):
         render_master_data(row)
-
-    with st.expander("Parent Information", expanded=False):
-        render_parent_information(row)
 
 except Exception as exc:
     st.error("Failed to load entity detail data.")

@@ -498,8 +498,7 @@ models:
         description: "Compact summary of sanctions match counts by quality tier, e.g. total_matches=3; high=1; medium=1; review=1."
 
   - name: mart_pipeline_audit_status
-    description:
-      "Dashboard-ready pipeline audit status mart with one row per latest job and target table combination where applicable. Source download jobs that write to MinIO may not have a target_table."
+    description: "Dashboard-ready pipeline audit status mart with one row per latest job and target table combination where applicable. Source download jobs that write to MinIO may not have a target_table."
 
     columns:
       - name: job_run_id
@@ -556,7 +555,21 @@ models:
         description: "Runtime duration of the latest job run in seconds."
 
       - name: effective_load_date
-        description: "Effective load date used by the job where available."
+        description: "Effective load date used by the job where available. This is kept for auditability but is not shown in the dashboard table health view."
+
+      - name: freshness_status
+        description: "Freshness status of the underlying raw data snapshot or inherited upstream data freshness. Typical values are fresh, stale or unknown."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 'fresh'
+                  - 'stale'
+                  - 'unknown'
+
+      - name: snapshot_age_days
+        description: "Age of the underlying raw data snapshot in days where available. For dbt-built tables, this value may be inherited from upstream audit records. Null means that no snapshot freshness information is available for this job."
 
       - name: rows_read
         description: "Number of rows read or counted by the job."
@@ -727,5 +740,218 @@ models:
 
       - name: mart_loaded_at
         description: "Timestamp when the mart was built."
+        tests:
+          - not_null
+
+  - name: mart_entity_relationship_edges
+    description: "Dashboard-ready entity relationship edge mart. Contains direct and ultimate parent relationships derived from GLEIF parent information in mart_entity_master."
+
+    columns:
+      - name: relationship_edge_id
+        description: "Deterministic identifier for the relationship edge."
+        tests:
+          - not_null
+          - unique
+
+      - name: child_entity_candidate_id
+        description: "Entity candidate identifier of the child entity."
+        tests:
+          - not_null
+
+      - name: child_lei
+        description: "LEI of the child entity."
+        tests:
+          - not_null
+
+      - name: child_legal_name
+        description: "Legal name of the child entity."
+
+      - name: child_legal_name_normalized
+        description: "Normalized legal name of the child entity."
+
+      - name: child_country
+        description: "Country of the child entity."
+
+      - name: parent_lei
+        description: "LEI of the parent entity."
+        tests:
+          - not_null
+
+      - name: parent_name
+        description: "Name of the parent entity."
+
+      - name: relationship_type
+        description: "Type of parent relationship."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - direct_parent
+                  - ultimate_parent
+
+      - name: relationship_depth
+        description: "Depth of the relationship from the child entity."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Source load date of the underlying GLEIF data."
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart table was built."
+        tests:
+          - not_null
+
+  - name: mart_entity_parent_paths
+    description: "Recursive parent path mart. Contains known parent chains from each entity to its direct and further known parent entities."
+
+    columns:
+      - name: relationship_path_id
+        description: "Deterministic identifier for a parent path step."
+        tests:
+          - not_null
+          - unique
+
+      - name: root_entity_candidate_id
+        description: "Entity candidate identifier of the root child entity."
+        tests:
+          - not_null
+
+      - name: root_lei
+        description: "LEI of the root child entity."
+        tests:
+          - not_null
+
+      - name: root_legal_name
+        description: "Legal name of the root child entity."
+
+      - name: root_legal_name_normalized
+        description: "Normalized legal name of the root child entity."
+
+      - name: root_country
+        description: "Country of the root child entity."
+
+      - name: ancestor_lei
+        description: "LEI of the ancestor entity at this relationship depth."
+        tests:
+          - not_null
+
+      - name: ancestor_name
+        description: "Name of the ancestor entity at this relationship depth."
+
+      - name: relationship_depth
+        description: "Depth of the ancestor from the root entity."
+        tests:
+          - not_null
+
+      - name: lei_path_text
+        description: "Text representation of the parent path."
+
+      - name: is_furthest_known_ancestor
+        description: "True if this row represents the furthest known ancestor for the root entity."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Source load date of the underlying GLEIF data."
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart table was built."
+        tests:
+          - not_null
+
+  - name: mart_entity_relationship_context
+    description: "Dashboard-ready entity relationship context mart. Contains one row per entity with parent, child, same-parent peer, and parent-chain summary metrics."
+
+    columns:
+      - name: entity_candidate_id
+        description: "Unique entity candidate identifier."
+        tests:
+          - not_null
+          - unique
+
+      - name: lei
+        description: "Legal Entity Identifier."
+        tests:
+          - not_null
+          - unique
+
+      - name: legal_name
+        description: "Legal name of the entity."
+
+      - name: legal_name_normalized
+        description: "Normalized legal name of the entity."
+
+      - name: country
+        description: "Entity country."
+
+      - name: direct_parent_lei
+        description: "Direct parent LEI where available."
+
+      - name: direct_parent_name
+        description: "Direct parent name where available."
+
+      - name: ultimate_parent_lei
+        description: "Ultimate parent LEI where available."
+
+      - name: ultimate_parent_name
+        description: "Ultimate parent name where available."
+
+      - name: has_direct_parent
+        description: "True if a direct parent is known."
+        tests:
+          - not_null
+
+      - name: has_ultimate_parent
+        description: "True if an ultimate parent is known."
+        tests:
+          - not_null
+
+      - name: has_any_parent
+        description: "True if any parent relationship is known."
+        tests:
+          - not_null
+
+      - name: known_child_count
+        description: "Number of known direct child entities."
+        tests:
+          - not_null
+
+      - name: total_descendant_count
+        description: "Number of known direct and indirect descendant entities based on parent path traversal."
+        tests:
+          - not_null
+
+      - name: same_parent_entity_count
+        description: "Number of other entities sharing the same direct parent."
+        tests:
+          - not_null
+
+      - name: parent_chain_depth
+        description: "Maximum known parent chain depth."
+        tests:
+          - not_null
+
+      - name: parent_path_count
+        description: "Number of known parent path steps."
+        tests:
+          - not_null
+
+      - name: has_known_children
+        description: "True if the entity has known direct child entities."
+        tests:
+          - not_null
+
+      - name: relationship_context_summary
+        description: "Human-readable relationship context summary."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Source load date of the underlying GLEIF data."
+
+      - name: mart_loaded_at
+        description: "Timestamp when the mart table was built."
         tests:
           - not_null

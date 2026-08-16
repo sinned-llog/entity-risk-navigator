@@ -44,6 +44,143 @@ def build_dbt_command(model_name: str, dbt_vars: dict[str, Any] | None = None) -
 
     return cmd
 
+def parse_source_tables(source: str | None) -> list:
+    """
+    Parses comma-separated upstream source tables from model config.
+
+    Example:
+    "raw.gleif_lei_full, raw.gleif_rr_full"
+    -> ["raw.gleif_lei_full", "raw.gleif_rr_full"]
+    """
+    if not source:
+        return []
+
+    return [
+        item.strip()
+        for item in source.split(",")
+        if item.strip()
+    ]
+
+def get_inherited_freshness(
+    postgres: PostgresClient,
+    source: str | None,
+) -> dict[str, Any]:
+    """
+    Inherits freshness information from latest successful upstream audit runs.
+
+    The inheritance is based on the model config's source field.
+
+    Rules:
+    - If any upstream source is stale -> stale
+    - If any upstream source is unknown or missing -> unknown
+    - If all upstream sources are fresh -> fresh
+    - snapshot_age_days is the max age across matched upstream sources
+
+    Important:
+    Some audit rows contain multiple target tables in one field, e.g.
+    "raw.gleif_lei_full, raw.gleif_rr_full".
+    This query expands comma-separated target_table values in SQL.
+    """
+    source_tables = parse_source_tables(source)
+
+    if not source_tables:
+        return {
+            "freshness_status": "unknown",
+            "snapshot_age_days": None,
+        }
+
+    values_sql = ", ".join(["(%s)"] * len(source_tables))
+
+    query = f"""
+        with requested_sources(source_table) as (
+            values {values_sql}
+        ),
+
+        expanded_audit as (
+            select
+                jr.job_run_id,
+                jr.target_table,
+                trim(target_table_part) as expanded_target_table,
+                jr.status,
+                jr.freshness_status,
+                jr.snapshot_age_days,
+                jr.started_at,
+                jr.finished_at
+            from audit.job_runs jr
+            cross join lateral regexp_split_to_table(
+                coalesce(jr.target_table, ''),
+                '\\s*,\\s*'
+            ) as target_table_part
+            where jr.status in ('success', 'success_with_warnings')
+              and jr.target_table is not null
+              and trim(target_table_part) <> ''
+        ),
+
+        latest_per_source as (
+            select
+                rs.source_table,
+                ea.freshness_status,
+                ea.snapshot_age_days,
+                row_number() over (
+                    partition by rs.source_table
+                    order by
+                        ea.finished_at desc nulls last,
+                        ea.started_at desc nulls last,
+                        ea.job_run_id desc
+                ) as row_num
+            from requested_sources rs
+            left join expanded_audit ea
+                on rs.source_table = ea.expanded_target_table
+        ),
+
+        latest_only as (
+            select
+                source_table,
+                freshness_status,
+                snapshot_age_days
+            from latest_per_source
+            where row_num = 1
+               or row_num is null
+        )
+
+        select
+            case
+                when count(*) filter (
+                    where freshness_status = 'stale'
+                ) > 0
+                    then 'stale'
+
+                when count(*) filter (
+                    where freshness_status is null
+                       or freshness_status = 'unknown'
+                ) > 0
+                    then 'unknown'
+
+                when count(*) filter (
+                    where freshness_status = 'fresh'
+                ) = count(*)
+                    then 'fresh'
+
+                else 'unknown'
+            end as inherited_freshness_status,
+
+            max(snapshot_age_days) as inherited_snapshot_age_days
+        from latest_only
+    """
+
+    row = postgres.fetch_one(query, tuple(source_tables))
+
+    if row is None:
+        return {
+            "freshness_status": "unknown",
+            "snapshot_age_days": None,
+        }
+
+    return {
+        "freshness_status": row[0] or "unknown",
+        "snapshot_age_days": row[1],
+    }
+
 
 def run_dbt_model(model_config: dict[str, Any]) -> None:
     """
@@ -101,13 +238,26 @@ def run_dbt_model(model_config: dict[str, Any]) -> None:
             rows_inserted = postgres.fetch_scalar(f"SELECT COUNT(*) FROM {target_table};") or 0
             rows_read = rows_inserted
 
+        inherited_freshness = get_inherited_freshness(
+            postgres=postgres,
+            source=source,
+        )
+
         finish_job_run_success(
             postgres=postgres,
             job_run_id=job_run_id,
             status="success",
             effective_load_date=(dbt_vars or {}).get("gleif_staging_load_date"),
+            freshness=inherited_freshness,
             rows_read=rows_read,
             rows_inserted=rows_inserted,
+            metadata_json={
+                "dbt_model": model_name,
+                "materialization": "view" if is_view else "table",
+                "dbt_vars": dbt_vars or {},
+                "inherited_freshness": inherited_freshness,
+                "freshness_source": source,
+            },
         )
 
         print(

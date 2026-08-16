@@ -409,6 +409,8 @@ def get_pipeline_table_health_details():
             a.status,
 
             coalesce(a.pipeline_health_status, 'missing_run') as pipeline_health_status,
+            coalesce(a.freshness_status, 'unknown') as freshness_status,
+            a.snapshot_age_days,
             coalesce(a.is_successful_latest_run, false) as is_successful_latest_run,
             coalesce(a.is_failed_or_incomplete_latest_run, false) as is_failed_or_incomplete_latest_run,
 
@@ -423,7 +425,6 @@ def get_pipeline_table_health_details():
             a.duration_seconds,
             a.last_success_at,
             a.last_failure_at,
-            a.effective_load_date,
             a.error_message,
             a.mart_loaded_at
 
@@ -466,7 +467,8 @@ def get_pipeline_latest_loads():
             a.started_at,
             a.finished_at,
             a.duration_seconds,
-            a.effective_load_date,
+            a.freshness_status,
+            a.snapshot_age_days,
             a.rows_read,
             a.rows_inserted,
             a.total_run_count,
@@ -531,3 +533,155 @@ def get_ecb_macro_context():
             indicator_name asc
     """
     return read_sql(query)
+
+############################################################################
+# Entity Relationship Queries
+############################################################################
+
+def get_entity_relationship_context(entity_candidate_id: str):
+    query = """
+        select
+            entity_candidate_id,
+            lei,
+            legal_name,
+            legal_name_normalized,
+            country,
+
+            direct_parent_lei,
+            direct_parent_name,
+            ultimate_parent_lei,
+            ultimate_parent_name,
+
+            has_direct_parent,
+            has_ultimate_parent,
+            has_any_parent,
+
+            known_child_count,
+            total_descendant_count,
+            same_parent_entity_count,
+            parent_chain_depth,
+            parent_path_count,
+
+            furthest_known_ancestor_lei,
+            furthest_known_ancestor_name,
+
+            has_known_children,
+            relationship_context_summary,
+
+            source_load_date,
+            mart_loaded_at
+        from marts.mart_entity_relationship_context
+        where entity_candidate_id = :entity_candidate_id
+        limit 1
+    """
+
+    return read_sql(
+        query,
+        params={"entity_candidate_id": entity_candidate_id},
+    )
+
+
+def get_entity_child_entities(lei: str, limit: int = 1000):
+    query = """
+        select
+            p.root_entity_candidate_id as entity_candidate_id,
+            p.root_lei as lei,
+            p.root_legal_name as legal_name,
+            p.root_legal_name_normalized as legal_name_normalized,
+            p.root_country as country,
+
+            m.entity_status,
+            m.registration_status,
+            m.direct_parent_lei,
+            m.direct_parent_name,
+
+            p.relationship_depth,
+            case
+                when p.relationship_depth = 1 then 'direct_child'
+                else 'indirect_descendant'
+            end as relationship_level,
+
+            p.lei_path_text
+
+        from marts.mart_entity_parent_paths p
+        left join marts.mart_entity_master m
+            on p.root_entity_candidate_id = m.entity_candidate_id
+
+        where p.ancestor_lei = :lei
+          and p.root_lei <> :lei
+
+        order by
+            p.relationship_depth asc,
+            p.root_legal_name_normalized asc
+
+        limit :limit
+    """
+
+    return read_sql(
+        query,
+        params={
+            "lei": lei,
+            "limit": limit,
+        },
+    )
+
+def get_entity_same_parent_entities(
+    entity_candidate_id: str,
+    direct_parent_lei: str,
+    limit: int = 1000,
+):
+    query = """
+        select
+            entity_candidate_id,
+            lei,
+            legal_name,
+            legal_name_normalized,
+            country,
+            entity_status,
+            registration_status,
+            direct_parent_lei,
+            direct_parent_name
+        from marts.mart_entity_master
+        where direct_parent_lei = :direct_parent_lei
+          and entity_candidate_id <> :entity_candidate_id
+        order by
+            legal_name_normalized asc
+        limit :limit
+    """
+
+    return read_sql(
+        query,
+        params={
+            "entity_candidate_id": entity_candidate_id,
+            "direct_parent_lei": direct_parent_lei,
+            "limit": limit,
+        },
+    )
+
+
+def get_entity_parent_path(entity_candidate_id: str):
+    query = """
+        select
+            root_entity_candidate_id,
+            root_lei,
+            root_legal_name,
+            root_legal_name_normalized,
+
+            ancestor_lei,
+            ancestor_name,
+            relationship_depth,
+            lei_path_text,
+            is_furthest_known_ancestor,
+
+            source_load_date,
+            mart_loaded_at
+        from marts.mart_entity_parent_paths
+        where root_entity_candidate_id = :entity_candidate_id
+        order by
+            relationship_depth asc
+    """
+
+    return read_sql(
+        query,
+        params={"entity_candidate_id": entity_candidate_id},
+    )

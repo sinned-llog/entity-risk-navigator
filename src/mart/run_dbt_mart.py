@@ -37,6 +37,27 @@ MART_MODELS = [
         "source": "staging.stg_ecb_observations_full",
         "job_type": "mart",
     },
+    {
+        "model_name": "mart_entity_relationship_edges",
+        "target_table": "marts.mart_entity_relationship_edges",
+        "is_view": False,
+        "source": "marts.mart_entity_master",
+        "job_type": "mart",
+    },
+    {
+        "model_name": "mart_entity_parent_paths",
+        "target_table": "marts.mart_entity_parent_paths",
+        "is_view": False,
+        "source": "marts.mart_entity_master",
+        "job_type": "mart",
+    },
+    {
+        "model_name": "mart_entity_relationship_context",
+        "target_table": "marts.mart_entity_relationship_context",
+        "is_view": False,
+        "source": "marts.mart_entity_master, marts.mart_entity_relationship_edges, marts.mart_entity_parent_paths",
+        "job_type": "mart",
+    },
 ]
 
 

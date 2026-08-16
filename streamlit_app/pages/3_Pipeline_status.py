@@ -30,6 +30,11 @@ HEALTH_LABELS = {
     "missing_run": "Missing run",
 }
 
+FRESHNESS_LABELS = {
+    "fresh": "Fresh",
+    "stale": "Stale",
+    "unknown": "Unknown",
+}
 
 def format_int(value):
     if pd.isna(value):
@@ -70,6 +75,18 @@ def add_health_label(df):
 
     return df
 
+def add_freshness_label(df):
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    if "freshness_status" in df.columns:
+        df["freshness_status_display"] = df["freshness_status"].map(
+            FRESHNESS_LABELS
+        ).fillna(df["freshness_status"])
+
+    return df
 
 try:
     metrics_df = get_pipeline_table_status_metrics()
@@ -115,6 +132,7 @@ try:
 
     table_health_df = get_pipeline_table_health_details()
     table_health_df = add_health_label(table_health_df)
+    table_health_df = add_freshness_label(table_health_df)
 
     if table_health_df.empty:
         st.info("No table-level pipeline details found.")
@@ -145,7 +163,8 @@ try:
             "duration_display",
             "last_success_at",
             "last_failure_at",
-            "effective_load_date",
+            "freshness_status_display",
+            "snapshot_age_days",
             "error_message",
         ]
 
@@ -174,7 +193,8 @@ try:
                 "duration_display": "Duration",
                 "last_success_at": "Last success at",
                 "last_failure_at": "Last failure at",
-                "effective_load_date": "Effective load date",
+                "freshness_status_display": "Freshness",
+                "snapshot_age_days": "Snapshot age (days)",
                 "error_message": "Error message",
             }
         )
@@ -194,6 +214,7 @@ try:
 
     latest_loads_df = get_pipeline_latest_loads()
     latest_loads_df = add_health_label(latest_loads_df)
+    latest_loads_df = add_freshness_label(latest_loads_df)
 
     if latest_loads_df.empty:
         st.info("No latest load details found.")
@@ -220,7 +241,8 @@ try:
         "started_at",
         "finished_at",
         "duration_display",
-        "effective_load_date",
+        "freshness_status_display",
+        "snapshot_age_days",
         "rows_read",
         "rows_inserted",
         "total_run_count",
@@ -253,7 +275,8 @@ try:
             "started_at": "Started at",
             "finished_at": "Finished at",
             "duration_display": "Duration",
-            "effective_load_date": "Effective load date",
+            "freshness_status_display": "Freshness",
+            "snapshot_age_days": "Snapshot age (days)",
             "rows_read": "Rows read",
             "rows_inserted": "Rows inserted",
             "total_run_count": "Total runs",

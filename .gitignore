@@ -15,6 +15,10 @@ data/samples/
 *.html
 *.parquet
 
+# Keep dbt seed files versioned
+!dbt/seeds/
+!dbt/seeds/*.csv
+
 # Notebooks
 .ipynb_checkpoints/
 
