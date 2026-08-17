@@ -497,43 +497,6 @@ def get_pipeline_latest_loads():
     """
     return read_sql(query)
 
-    ############################################################################
-# Macro Context Queries
-############################################################################
-
-def get_ecb_macro_context():
-    query = """
-        select
-            ecb_macro_context_id,
-            indicator_code,
-            display_order,
-            indicator_name,
-            dataset_code,
-            dataflow,
-            reference_area,
-            reference_area_name,
-            frequency,
-            unit,
-            first_obs_date,
-            latest_obs_date,
-            latest_time_period,
-            latest_obs_value,
-            latest_obs_status,
-            previous_obs_date,
-            previous_obs_value,
-            latest_change_abs,
-            latest_change_pct,
-            observation_count,
-            source_load_date,
-            source_url,
-            mart_loaded_at
-        from marts.mart_ecb_macro_context
-        order by
-            display_order asc,
-            indicator_name asc
-    """
-    return read_sql(query)
-
 ############################################################################
 # Entity Relationship Queries
 ############################################################################
@@ -679,6 +642,164 @@ def get_entity_parent_path(entity_candidate_id: str):
         where root_entity_candidate_id = :entity_candidate_id
         order by
             relationship_depth asc
+    """
+
+    return read_sql(
+        query,
+        params={"entity_candidate_id": entity_candidate_id},
+    )
+
+############################################################################
+# ECB Macro Time Series Queries
+############################################################################
+
+def get_ecb_macro_indicator_options():
+    query = """
+        select distinct
+            indicator_code,
+            indicator_name,
+            frequency,
+            unit,
+            reference_area_name
+        from marts.mart_ecb_macro_timeseries
+        order by indicator_name
+    """
+
+    return read_sql(query)
+
+
+def get_ecb_macro_timeseries(indicator_code: str | None = None):
+    query = """
+        select
+            indicator_code,
+            indicator_name,
+            dataset_code,
+            series_key,
+            frequency,
+            unit,
+            reference_area,
+            reference_area_name,
+            obs_date,
+            obs_value,
+            previous_obs_value,
+            change_abs,
+            change_pct,
+            rolling_avg_3_obs,
+            rolling_avg_6_obs,
+            rolling_avg_12_obs,
+            is_latest_observation,
+            source_load_date,
+            mart_loaded_at
+        from marts.mart_ecb_macro_timeseries
+        where (:indicator_code is null or indicator_code = :indicator_code)
+        order by
+            indicator_name,
+            obs_date
+    """
+
+    return read_sql(
+        query,
+        params={"indicator_code": indicator_code},
+    )
+
+
+def get_ecb_macro_latest_observations():
+    query = """
+        select
+            indicator_code,
+            indicator_name,
+            frequency,
+            unit,
+            reference_area_name,
+            obs_date as latest_obs_date,
+            obs_value as latest_obs_value,
+            previous_obs_value,
+            change_abs,
+            change_pct,
+            rolling_avg_3_obs,
+            rolling_avg_6_obs,
+            rolling_avg_12_obs,
+            source_load_date
+        from marts.mart_ecb_macro_timeseries
+        where is_latest_observation = true
+        order by indicator_name
+    """
+
+    return read_sql(query)
+
+def get_ecb_macro_pressure_summary():
+    query = """
+        select
+            macro_pressure_score,
+            macro_pressure_level,
+            macro_trend_direction,
+            weighted_trend_signal,
+            macro_pressure_summary,
+            max(latest_obs_date) as latest_obs_date,
+            max(source_load_date) as source_load_date,
+            max(mart_loaded_at) as mart_loaded_at
+        from marts.mart_ecb_macro_pressure_score
+        group by
+            macro_pressure_score,
+            macro_pressure_level,
+            macro_trend_direction,
+            weighted_trend_signal,
+            macro_pressure_summary
+        limit 1
+    """
+
+    return read_sql(query)
+
+def get_ecb_macro_pressure_indicators():
+    query = """
+        select
+            indicator_code,
+            indicator_name,
+            latest_obs_date,
+            latest_obs_value,
+            previous_obs_value,
+            change_abs,
+            change_pct,
+            current_level_score,
+            momentum_score,
+            trend_projection_score,
+            trend_direction,
+            indicator_pressure_score,
+            indicator_weight,
+            frequency,
+            unit,
+            reference_area_name,
+            source_load_date
+        from marts.mart_ecb_macro_pressure_score
+        order by
+            indicator_weight desc,
+            indicator_code asc
+    """
+
+    return read_sql(query)
+
+def get_entity_macro_context(entity_candidate_id: str):
+    query = """
+        select
+            entity_candidate_id,
+            lei,
+            legal_name,
+            country,
+            is_euro_area_country,
+            macro_context_applicability,
+            macro_applicability_weight,
+            macro_context_applicability_reason,
+            macro_pressure_score,
+            macro_pressure_level,
+            macro_trend_direction,
+            entity_macro_context_score,
+            entity_macro_context_summary,
+            macro_pressure_summary,
+            macro_pressure_loaded_at,
+            mart_loaded_at
+        from marts.mart_entity_macro_context
+        where entity_candidate_id = :entity_candidate_id
+        limit 1
     """
 
     return read_sql(

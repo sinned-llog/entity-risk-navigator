@@ -11,6 +11,7 @@ from src.queries import (
     get_entity_child_entities,
     get_entity_same_parent_entities,
     get_entity_parent_path,
+    get_entity_macro_context,
 )
 
 
@@ -330,6 +331,71 @@ def render_relationship_context(
             hide_index=True,
         )
 
+def render_macro_context(macro_context_df):
+    st.subheader("Macro Environment Context")
+
+    if macro_context_df.empty:
+        st.info("No macro context available for this entity.")
+        return
+
+    macro = macro_context_df.iloc[0]
+
+    macro_pressure_score = macro.get("macro_pressure_score")
+    macro_pressure_level = macro.get("macro_pressure_level")
+    macro_trend_direction = macro.get("macro_trend_direction")
+    entity_macro_context_score = macro.get("entity_macro_context_score")
+    applicability = macro.get("macro_context_applicability")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "Macro Pressure",
+        str(macro_pressure_level).replace("_", " ").title()
+        if pd.notna(macro_pressure_level)
+        else "n/a",
+    )
+
+    col2.metric(
+        "Pressure Score",
+        f"{macro_pressure_score:.2f}"
+        if pd.notna(macro_pressure_score)
+        else "n/a",
+    )
+
+    col3.metric(
+        "Trend",
+        str(macro_trend_direction).replace("_", " ").title()
+        if pd.notna(macro_trend_direction)
+        else "n/a",
+    )
+
+    col4.metric(
+        "Entity Context Score",
+        f"{entity_macro_context_score:.2f}"
+        if pd.notna(entity_macro_context_score)
+        else "n/a",
+    )
+
+    if applicability == "applicable":
+        st.success("Applicability: Applicable")
+    elif applicability == "reduced":
+        st.warning("Applicability: Reduced")
+    else:
+        st.info("Applicability: Unknown")
+
+    reason = macro.get("macro_context_applicability_reason")
+    if reason:
+        st.caption(reason)
+
+    summary = macro.get("entity_macro_context_summary")
+    if summary:
+        st.info(summary)
+
+    st.caption(
+        "ECB macro indicators are shown as contextual information and are not part "
+        "of the current entity sanctions risk score."
+    )
+
 try:
     search_term = st.text_input(
         "Search entity by LEI or name",
@@ -379,6 +445,10 @@ try:
     if summary_df.empty:
         st.warning("No detail data found for selected entity.")
         st.stop()
+
+    macro_context_df = get_entity_macro_context(
+        entity_candidate_id=selected_entity_candidate_id
+    )
 
     matches_df = get_entity_sanctions_matches(
         entity_candidate_id=selected_entity_candidate_id
@@ -437,6 +507,11 @@ try:
             same_parent_entities_df=same_parent_entities_df,
             parent_path_df=parent_path_df,
         )
+
+    st.divider()
+
+    with st.expander("Macro Environment Context", expanded=True):
+            render_macro_context(macro_context_df)
 
     st.divider()
 

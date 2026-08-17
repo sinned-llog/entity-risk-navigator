@@ -3,10 +3,12 @@ marts,marts.mart_entity_master,Entity master,true,true,10,Core dashboard entity 
 marts,marts.mart_entity_risk_score,Entity risk score,true,true,20,Aggregated entity risk score
 marts,marts.mart_entity_sanctions_screening,Entity sanctions screening,true,true,30,Match level sanctions screening detail
 marts,marts.mart_pipeline_audit_status,Pipeline audit status,true,true,40,Dashboard pipeline audit status
-marts,marts.mart_ecb_macro_context,ECB macro context,true,true,50,Dashboard only macro context
-marts,marts.mart_marts.mart_entity_relationship_edges,Entity relationship edges,true,true,60,Direct and ultimate parent organization
-marts,marts.mart_entity_parent_path,parent path information,true,true,70,Child and Parent information to entities
-marts,marts.mart_entity_relationship_context,Dashboard ready relationship information,true,true,80,Dashboard relationship information
+marts,marts.mart_marts.mart_entity_relationship_edges,Entity relationship edges,true,true,50,Direct and ultimate parent organization
+marts,marts.mart_entity_parent_path,parent path information,true,true,60,Child and Parent information to entities
+marts,marts.mart_entity_relationship_context,Dashboard ready relationship information,true,true,70,Dashboard relationship information
+marts,marts.mart_ecb_macro_timeseries,ECB macro timeseries,true,true,80,ECB macro time series mart with standardized observations previous values changes rolling averages and latest observation flags
+marts,marts.mart_ecb_macro_pressure_score,ECB macro pressure score,true,true,90,ECB macro pressure score based on current level momentum and short-term trend
+marts,marts.mart_entity_macro_context,Entity macro context,true,true,100,Entity-level macro context based on ECB macro pressure score and jurisdiction applicability
 
 staging,staging.stg_bafin_pages_full,BaFin pages full,false,false,100,Deferred BaFin staging table not active in current MVP
 staging,staging.stg_ecb_observations_full,ECB observations full,true,true,110,ECB staging observations for dashboard macro context

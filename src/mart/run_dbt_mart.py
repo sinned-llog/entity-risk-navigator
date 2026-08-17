@@ -58,6 +58,27 @@ MART_MODELS = [
         "source": "marts.mart_entity_master, marts.mart_entity_relationship_edges, marts.mart_entity_parent_paths",
         "job_type": "mart",
     },
+    {
+        "model_name": "mart_ecb_macro_timeseries",
+        "target_table": "marts.mart_ecb_macro_timeseries",
+        "is_view": False,
+        "source": "staging.stg_ecb_observations_full",
+        "job_type": "mart",
+    },
+    {
+        "model_name": "mart_ecb_macro_pressure_score",
+        "target_table": "marts.mart_ecb_macro_pressure_score",
+        "is_view": False,
+        "source": "marts.mart_ecb_macro_timeseries",
+        "job_type": "mart",
+    },
+    {
+        "model_name": "mart_entity_macro_context",
+        "target_table": "marts.mart_entity_macro_context",
+        "is_view": False,
+        "source": "marts.mart_entity_master, marts.mart_ecb_macro_pressure_score",
+        "job_type": "mart",
+    },
 ]
 
 

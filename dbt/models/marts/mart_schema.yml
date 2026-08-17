@@ -629,120 +629,6 @@ models:
         tests:
           - not_null
 
-  - name: mart_ecb_macro_context
-    description: "Dashboard-ready ECB macro context mart with one row per ECB macro indicator series. The table provides latest available observations and simple change metrics for contextual dashboard display. It is not used as a direct driver of the entity risk score."
-
-    columns:
-      - name: ecb_macro_context_id
-        description: "Deterministic unique identifier for the ECB macro context series."
-        tests:
-          - not_null
-          - unique
-
-      - name: indicator_code
-        description: "Stable dashboard-friendly indicator code."
-        tests:
-          - not_null
-          - unique
-
-      - name: display_order
-        description: "Numeric display order for dashboard cards."
-        tests:
-          - not_null
-
-      - name: indicator_name
-        description: "Human-readable ECB indicator name."
-        tests:
-          - not_null
-
-      - name: dataset_code
-        description: "ECB dataset code, e.g. EST, MIR or YC."
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['EST', 'MIR', 'YC']
-
-      - name: dataflow
-        description: "ECB dataflow identifier."
-
-      - name: ecb_key_full
-        description: "Full ECB key including the dataset code."
-
-      - name: series_key
-        description: "ECB series key without the dataset prefix."
-        tests:
-          - not_null
-
-      - name: reference_area
-        description: "ECB reference area code. In the current dataset this is mainly U2 for the euro area."
-        tests:
-          - not_null
-
-      - name: reference_area_name
-        description: "Human-readable reference area name."
-
-      - name: frequency
-        description: "Observation frequency, e.g. B for business daily or M for monthly."
-        tests:
-          - not_null
-
-      - name: unit
-        description: "Measurement unit of the ECB observation."
-        tests:
-          - not_null
-
-      - name: first_obs_date
-        description: "First available observation date for the series."
-        tests:
-          - not_null
-
-      - name: latest_obs_date
-        description: "Latest available observation date for the series."
-        tests:
-          - not_null
-
-      - name: latest_time_period
-        description: "Latest ECB time period as provided by the source."
-
-      - name: latest_obs_value
-        description: "Latest available numeric observation value."
-        tests:
-          - not_null
-
-      - name: latest_obs_status
-        description: "Observation status of the latest value."
-
-      - name: previous_obs_date
-        description: "Previous available observation date for the same series."
-
-      - name: previous_obs_value
-        description: "Previous available numeric observation value for the same series."
-
-      - name: latest_change_abs
-        description: "Absolute change between latest and previous observation."
-
-      - name: latest_change_pct
-        description: "Relative change between latest and previous observation."
-
-      - name: observation_count
-        description: "Number of observations available for the series."
-        tests:
-          - not_null
-
-      - name: source_load_date
-        description: "Source load date of the ECB staging data."
-        tests:
-          - not_null
-
-      - name: source_url
-        description: "ECB API URL used for the source extraction."
-
-      - name: mart_loaded_at
-        description: "Timestamp when the mart was built."
-        tests:
-          - not_null
-
   - name: mart_entity_relationship_edges
     description: "Dashboard-ready entity relationship edge mart. Contains direct and ultimate parent relationships derived from GLEIF parent information in mart_entity_master."
 
@@ -953,5 +839,325 @@ models:
 
       - name: mart_loaded_at
         description: "Timestamp when the mart table was built."
+        tests:
+          - not_null
+
+  - name: mart_ecb_macro_timeseries
+    description: "Dashboard-ready ECB macro time series mart. Contains standardized ECB observations with previous values, absolute and relative changes, rolling averages and latest observation flags."
+
+    columns:
+      - name: ecb_macro_timeseries_id
+        description: "Deterministic identifier for one ECB indicator observation."
+        tests:
+          - not_null
+          - unique
+
+      - name: indicator_code
+        description: "Stable technical indicator code used by the dashboard."
+        tests:
+          - not_null
+
+      - name: indicator_name
+        description: "Human-readable ECB indicator name."
+        tests:
+          - not_null
+
+      - name: dataset_code
+        description: "ECB dataset code, e.g. EST, MIR or YC."
+
+      - name: series_key
+        description: "ECB series key."
+
+      - name: frequency
+        description: "Observation frequency."
+
+      - name: unit
+        description: "Observation unit."
+
+      - name: reference_area
+        description: "ECB reference area code."
+
+      - name: reference_area_name
+        description: "Human-readable reference area name."
+
+      - name: obs_date
+        description: "Observation date."
+        tests:
+          - not_null
+
+      - name: obs_value
+        description: "Observation value."
+        tests:
+          - not_null
+
+      - name: previous_obs_date
+        description: "Previous observation date within the same indicator and reference area."
+
+      - name: previous_obs_value
+        description: "Previous observation value within the same indicator and reference area."
+
+      - name: change_abs
+        description: "Absolute change compared with the previous observation."
+
+      - name: change_pct
+        description: "Relative change compared with the previous observation."
+
+      - name: rolling_avg_3_obs
+        description: "Rolling average over the latest 3 observations."
+
+      - name: rolling_avg_6_obs
+        description: "Rolling average over the latest 6 observations."
+
+      - name: rolling_avg_12_obs
+        description: "Rolling average over the latest 12 observations."
+
+      - name: obs_rank_desc
+        description: "Observation rank per indicator and reference area, ordered from latest to oldest."
+        tests:
+          - not_null
+
+      - name: observation_count
+        description: "Number of observations available for the indicator and reference area."
+        tests:
+          - not_null
+
+      - name: is_latest_observation
+        description: "True if this row is the latest observation for the indicator and reference area."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Source load date inherited from the ECB raw/staging layer."
+
+      - name: mart_loaded_at
+        description: "Timestamp when this mart was built."
+        tests:
+          - not_null
+
+  - name: mart_ecb_macro_pressure_score
+    description: "ECB macro pressure score mart. Calculates indicator-level pressure scores from ECB macro time series using current level, recent momentum and short-term trend projection. Also provides an aggregated Euro area macro pressure score."
+    columns:
+      - name: ecb_macro_pressure_indicator_id
+        description: "Deterministic identifier for the ECB macro pressure indicator row."
+        tests:
+          - not_null
+          - unique
+
+      - name: indicator_code
+        description: "Stable technical indicator code."
+        tests:
+          - not_null
+
+      - name: indicator_name
+        description: "Human-readable ECB indicator name."
+        tests:
+          - not_null
+
+      - name: latest_obs_date
+        description: "Latest observation date for this ECB indicator."
+        tests:
+          - not_null
+
+      - name: latest_obs_value
+        description: "Latest observation value for this ECB indicator."
+        tests:
+          - not_null
+
+      - name: current_level_score
+        description: "Score from 0 to 100 indicating where the latest value sits within the historical distribution of this indicator."
+        tests:
+          - not_null
+
+      - name: momentum_score
+        description: "Score from 0 to 100 based on recent absolute change compared with the historical distribution of changes."
+        tests:
+          - not_null
+
+      - name: trend_projection_score
+        description: "Score from 0 to 100 based on the short-term trend slope of the latest observations."
+        tests:
+          - not_null
+
+      - name: trend_direction
+        description: "Short-term trend direction for the indicator."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - upward
+                  - stable
+                  - downward
+                  - unknown
+
+      - name: indicator_pressure_score
+        description: "Weighted indicator-level pressure score from current level, momentum and trend projection."
+        tests:
+          - not_null
+
+      - name: indicator_weight
+        description: "Weight of the indicator in the overall macro pressure score."
+        tests:
+          - not_null
+
+      - name: macro_pressure_score
+        description: "Overall weighted Euro area macro pressure score from 0 to 100."
+        tests:
+          - not_null
+
+      - name: macro_pressure_level
+        description: "Overall macro pressure level."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - low
+                  - moderate
+                  - elevated
+                  - high
+
+      - name: macro_trend_direction
+        description: "Overall weighted macro trend direction."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - upward
+                  - stable
+                  - downward
+
+      - name: macro_pressure_summary
+        description: "Human-readable macro pressure interpretation for dashboard display."
+        tests:
+          - not_null
+
+      - name: source_load_date
+        description: "Source load date inherited from the ECB macro time series mart."
+
+      - name: mart_loaded_at
+        description: "Timestamp when this mart was built."
+        tests:
+          - not_null
+
+  - name: mart_entity_macro_context
+    description: "Entity-level ECB macro context mart. Combines the current Euro area macro pressure score with entity jurisdiction applicability. This context is not part of the current sanctions risk score."
+
+    columns:
+      - name: entity_macro_context_id
+        description: "Deterministic identifier for the entity macro context row."
+        tests:
+          - not_null
+          - unique
+
+      - name: entity_candidate_id
+        description: "Unique entity candidate identifier."
+        tests:
+          - not_null
+          - unique
+
+      - name: lei
+        description: "Legal Entity Identifier."
+        tests:
+          - not_null
+
+      - name: legal_name
+        description: "Legal name of the entity."
+
+      - name: legal_name_normalized
+        description: "Normalized legal name of the entity."
+
+      - name: country
+        description: "Entity country or jurisdiction code."
+
+      - name: is_euro_area_country
+        description: "True if the entity country is part of the euro area."
+        tests:
+          - not_null
+
+      - name: macro_context_applicability
+        description: "Applicability of ECB macro context to the entity jurisdiction."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - applicable
+                  - reduced
+                  - unknown
+
+      - name: macro_applicability_weight
+        description: "Applicability weight applied to the macro pressure score."
+        tests:
+          - not_null
+
+      - name: macro_context_applicability_reason
+        description: "Human-readable explanation of the macro context applicability."
+        tests:
+          - not_null
+
+      - name: macro_pressure_score
+        description: "Overall Euro area macro pressure score from 0 to 100."
+        tests:
+          - not_null
+
+      - name: macro_pressure_level
+        description: "Overall macro pressure level."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - low
+                  - moderate
+                  - elevated
+                  - high
+
+      - name: macro_trend_direction
+        description: "Overall macro trend direction."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - upward
+                  - stable
+                  - downward
+
+      - name: weighted_trend_signal
+        description: "Weighted aggregate trend signal across ECB indicators."
+
+      - name: macro_pressure_summary
+        description: "Human-readable macro pressure summary."
+        tests:
+          - not_null
+
+      - name: entity_macro_context_score
+        description: >
+          Macro pressure score adjusted by entity jurisdiction applicability.
+          This is a context score and not part of the sanctions risk score.
+        tests:
+          - not_null
+
+      - name: entity_macro_context_summary
+        description: "Human-readable entity-level macro context summary."
+        tests:
+          - not_null
+
+      - name: latest_ecb_obs_date
+        description: "Latest ECB observation date used in the macro pressure score."
+
+      - name: ecb_source_load_date
+        description: "Source load date of the underlying ECB data."
+
+      - name: entity_source_load_date
+        description: "Source load date of the underlying entity master data."
+
+      - name: macro_pressure_loaded_at
+        description: "Timestamp when the macro pressure mart was built."
+
+      - name: mart_loaded_at
+        description: "Timestamp when this mart was built."
         tests:
           - not_null
