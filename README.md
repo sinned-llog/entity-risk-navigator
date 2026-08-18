@@ -44,6 +44,7 @@ Check both health and freshness in the Pipeline Status dashboard page:
 - [Architecture](docs/architecture.md)
 - [Data sources](docs/data_sources.md)
 - [Pipeline design](docs/pipeline_design.md)
+- [Scoring logic](docs/scoring_logic.md)
 
 ## Disclaimer
 

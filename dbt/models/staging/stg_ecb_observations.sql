@@ -160,7 +160,23 @@ cleaned_and_transformed as (
 
     from normalized
 
+),
+
+latest_snapshot_per_observation as (
+
+    select
+        *,
+        row_number() over (
+            partition by dataset_code, series_key, time_period_raw
+            order by
+                source_load_date desc nulls last,
+                raw_loaded_at desc,
+                raw_id desc
+        ) as snapshot_rank
+    from cleaned_and_transformed
+
 )
 
 select *
-from cleaned_and_transformed
+from latest_snapshot_per_observation
+where snapshot_rank = 1
