@@ -48,7 +48,7 @@ The EU FSF exception reflects that the current unified EU FSF subject model does
 For each entity, the model aggregates all screening matches and evaluates the tiers in descending severity. The calculation is:
 
 $$
-\text{risk\_score} =
+R =
 \begin{cases}
 100 & \text{if at least one high-confidence match exists} \\
 60 & \text{otherwise, if at least one medium-confidence match exists} \\
@@ -100,14 +100,14 @@ $$
 The level and momentum inputs are percentile ranks from $0$ to $100$:
 
 $$
-L = 100 \cdot \mathrm{cume\_dist}(x_t)
+L = 100 \cdot F(x_t)
 $$
 
 $$
-M = 100 \cdot \mathrm{cume\_dist}(\Delta x_t)
+M = 100 \cdot F(\Delta x_t)
 $$
 
-The ranks are calculated separately for each indicator and reference area. A high level score therefore means the latest value is high relative to that series' own retained history; a high momentum score means its latest absolute change is high relative to that change history.
+Here, $F$ is the cumulative-distribution rank for the relevant indicator and reference area. The ranks are calculated separately for each indicator and reference area. A high level score therefore means the latest value is high relative to that series' own retained history; a high momentum score means its latest absolute change is high relative to that change history.
 
 The model estimates a linear regression slope across up to the latest 12 dated observations. It converts the slope to a directional score $T$:
 
@@ -131,7 +131,7 @@ $$
 The aggregate `macro_pressure_score` is the weighted average of available indicator scores. Let $w_i$ be an indicator weight:
 
 $$
-\text{macro\_pressure\_score} = \frac{\sum_i P_iw_i}{\sum_i w_i}
+P = \frac{\sum_i P_iw_i}{\sum_i w_i}
 $$
 
 The denominator only contains selected indicators with an available latest observation. This avoids treating unavailable data as a zero-pressure observation.
@@ -146,7 +146,7 @@ The denominator only contains selected indicators with an available latest obser
 The weighted trend signal is reported separately:
 
 $$
-\text{weighted\_trend\_signal} = \frac{\sum_i d_iw_i}{\sum_i w_i}, \qquad
+S = \frac{\sum_i d_iw_i}{\sum_i w_i}, \qquad
 d_i \in \{-1, 0, 1\}
 $$
 
@@ -159,8 +159,8 @@ where $d_i$ is $1$ for an upward trend, $-1$ for a downward trend, and $0$ for s
 | Entity jurisdiction | Applicability | Weight | `entity_macro_context_score` |
 | --- | --- | ---: | --- |
 | Euro-area country | `applicable` | 1.00 | Full `macro_pressure_score` |
-| Outside the euro area | `reduced` | 0.35 | $0.35 \cdot \text{macro\_pressure\_score}$ |
-| Country missing | `unknown` | 0.30 | $0.30 \cdot \text{macro\_pressure\_score}$ |
+| Outside the euro area | `reduced` | 0.35 | $0.35 \cdot P$ |
+| Country missing | `unknown` | 0.30 | $0.30 \cdot P$ |
 
 Euro-area applicability covers AT, BE, HR, CY, EE, FI, FR, DE, GR, IE, IT, LV, LT, LU, MT, NL, PT, SK, SI, and ES. For entities outside the euro area or without a mapped country, ECB information is shown as broader context with reduced applicability.
 
