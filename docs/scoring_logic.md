@@ -100,11 +100,11 @@ $$
 The level and momentum inputs are percentile ranks from $0$ to $100$:
 
 $$
-L = 100 \cdot \operatorname{cume\_dist}(x_t)
+L = 100 \cdot \mathrm{cume\_dist}(x_t)
 $$
 
 $$
-M = 100 \cdot \operatorname{cume\_dist}(\Delta x_t)
+M = 100 \cdot \mathrm{cume\_dist}(\Delta x_t)
 $$
 
 The ranks are calculated separately for each indicator and reference area. A high level score therefore means the latest value is high relative to that series' own retained history; a high momentum score means its latest absolute change is high relative to that change history.
