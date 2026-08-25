@@ -14,8 +14,6 @@ BaFin enrichment code is present but deferred: it is not included in the standar
 
 ## Architecture
 
-Fact_KI_Anschluesse
-
 The Docker runtime includes PostgreSQL, MinIO, an ingestion container, and the Streamlit dashboard. PostgreSQL is exposed on port `5432`, MinIO on ports `9000` and `9001`, and Streamlit on port `8501`.
 
 ## Running the pipeline
